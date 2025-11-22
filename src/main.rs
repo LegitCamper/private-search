@@ -1,4 +1,8 @@
-use rocket::{fs::FileServer, response::Redirect};
+use rocket::{
+    fs::FileServer,
+    response::Redirect,
+    serde::{Serialize, json::Json},
+};
 use rocket_dyn_templates::{Template, context};
 
 #[macro_use]
@@ -13,7 +17,7 @@ async fn main() -> Result<(), rocket::Error> {
     let _rocket = rocket::build()
         .attach(Template::fairing())
         .mount("/static", FileServer::from("static"))
-        .mount("/", routes![index, search, search_query])
+        .mount("/", routes![index, search, search_query, query])
         .ignite()
         .await?
         .launch()
@@ -43,21 +47,42 @@ fn search() -> Template {
         "search",
         context! {
             title: "Search",
-            articles: [0, 1, 2, 3, 4, 5],
+            query_id: 1,
         },
     )
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Engine {
-    Google,
+#[get("/query")]
+fn query<'a>() -> Json<Vec<WebSiteResult>> {
+    Json(vec![WebSiteResult::default(); 20])
 }
 
-#[derive(Debug, Clone)]
+impl Default for WebSiteResult {
+    fn default() -> Self {
+        WebSiteResult {
+            url: String::from("https://example.com"),
+            title: String::from("Some Example Site"),
+            description: String::from(
+                "This is some description of a really long description that could say something like the quick brown fox jumped up and over the moon and never came back. The End",
+            ),
+            engine: Engine::Google,
+            cached: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(crate = "rocket::serde")]
 struct WebSiteResult {
     url: String,
     title: String,
     description: String,
     engine: Engine,
     cached: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(crate = "rocket::serde")]
+enum Engine {
+    Google,
 }

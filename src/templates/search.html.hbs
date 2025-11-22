@@ -1,19 +1,22 @@
 {{#*inline "body"}}
 
-<div class="results-container">
+<div class="results-container"></div>
 
-  {{#each articles}}
-  <article class="result-skeleton" data-result-id="{{ id }}">
-    <a class="url_header"></a>
-    <h3><a class="name">{{ name }}</a></h3>
-    <p class="description">
-    <p>
-    <div class="engines">
-    </div>
-  </article>
-  {{/each}}
+<script type="text/javascript" src="static/search.js"></script>
 
-</div>
+<script>
+  // Server injects this dynamically
+  const QUERY_ID = "{{ query_id }}";
+
+  addEventListener("DOMContentLoaded", (event) => {
+    createSkeletons(20, 0)
+    window.scrollTo(0, 0);
+
+    if (!QUERY_ID) return;
+    // Start polling and rendering results
+    startPolling(QUERY_ID);
+  });
+</script>
 
 {{/inline}}
 {{> layout}}
