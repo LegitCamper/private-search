@@ -1,0 +1,19 @@
+{{#*inline "body"}}
+
+<div class="results-container">
+
+  {{#each articles}}
+  <article class="result-skeleton" data-result-id="{{ id }}">
+    <a class="url_header"></a>
+    <h3><a class="name">{{ name }}</a></h3>
+    <p class="description">
+    <p>
+    <div class="engines">
+    </div>
+  </article>
+  {{/each}}
+
+</div>
+
+{{/inline}}
+{{> layout}}

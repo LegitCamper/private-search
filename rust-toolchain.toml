@@ -1,0 +1,3 @@
+[toolchain]
+channel = "stable"
+omponents = ["rust-src", "rustfmt", "rust-analyzer"]
