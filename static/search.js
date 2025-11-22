@@ -7,7 +7,7 @@ let skeletons = 0;        // total skeletons created so far
 let batchLoading = false; // prevents multiple skeleton triggers
 
 
-function startPolling(qid) {
+async function startPolling(qid) {
   queryId = qid;
   polling = true;
   pollResults();
