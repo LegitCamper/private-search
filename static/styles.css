@@ -1,7 +1,7 @@
 html, body {
     height: 100%;
     margin: 0;
-    background-color: #505050;
+    background-color: #1e1e2e;
     color: white;
 }
 
@@ -13,8 +13,9 @@ html, body {
 }
 
 .search-bar {
-    width: 50%;
-    max-width: 400px;
+    max-width: 500px;
+    margin: 0 auto;
+    width: 95%;
     padding: 12px 20px;
     font-size: 18px;
     border-radius: 8px;
@@ -26,39 +27,76 @@ html, body {
     max-width: 700px;
     margin: 0 auto;
     width: 95%;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1rem;
+    min-height: 100vh;
+    color: #cdd6f4; 
+    font-family: 'Inter', sans-serif;
 }
 
-
-.result-skeleton {
-    position: relative;
-    padding: 16px;
-    margin-bottom: 20px;
-    border-radius: 8px;
-    border: 1px solid #ddd;
-    background: #fafafa;
+.result, .result-skeleton {
+    background-color: #313244; 
+    border-radius: 12px;
+    padding: 1rem 1.5rem;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+    transition: background-color 0.3s ease, box-shadow 0.3s ease;
 }
 
-.result-skeleton * {
-    color: transparent;
-    background-color: #e5e5e5;
+.result:hover {
+    background-color: #45475a;
+    box-shadow: 0 6px 12px rgba(0,0,0,0.6);
+}
+
+.result .url_header {
+    display: block;
+    color: #f5c2e7; 
+    font-size: 0.875rem;
+    margin-bottom: 0.25rem;
+    text-decoration: none;
+    word-break: break-all;
+}
+.result .url_header:hover {
+    text-decoration: underline;
+}
+
+.result h3 {
+    margin: 0.25rem 0;
+    font-size: 1.2rem;
+    color: #f5f5f5;
+}
+
+.result .description {
+    font-size: 0.95rem;
+    color: #bac2de;
+    line-height: 1.4;
+    margin: 0.5rem 0;
+}
+
+.result .engines {
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+    color: #94e2d5;
+    display: flex;
+    gap: 0.5rem;
+}
+
+.skeleton {
+    background: linear-gradient(
+        90deg,
+        rgba(255,255,255,0.05) 25%,
+        rgba(255,255,255,0.15) 50%,
+        rgba(255,255,255,0.05) 75%
+    );
+    background-size: 200% 100%;
     border-radius: 4px;
-    box-sizing: border-box;
+    display: inline-block;
+    animation: shimmer 1.2s infinite;
 }
 
-.result-skeleton a,
-.result-skeleton p,
-.result-skeleton div,
-.result-skeleton h3 {
-    display: block;
-    min-height: 0.9em;
-    margin-bottom: 8px;
-}
-
-.result-skeleton *::after {
-    content: "";
-    display: block;
-    width: 100%;
-    height: 100%;
-    position: absolute;
-}
+.skeleton-url { height: 12px; width: 60%; margin-bottom: 0.5rem; }
+.skeleton-title { height: 18px; width: 80%; margin-bottom: 0.5rem; }
+.skeleton-description { height: 10px; width: 100%; margin-bottom: 0.25rem; }
+.skeleton-engine { height: 10px; width: 20%; margin-right: 0.25rem; }
 
