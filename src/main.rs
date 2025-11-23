@@ -5,19 +5,19 @@ use rocket::{
 };
 use rocket_dyn_templates::{Template, context};
 
+use crate::engines::{Engine, duckduckgo::DuckDuckGo};
+
 #[macro_use]
 extern crate rocket;
 
+mod engines;
+
 #[rocket::main]
 async fn main() -> Result<(), rocket::Error> {
-    // let _ = tokio::spawn(async {
-    // })
-    // .await;
-
     let _rocket = rocket::build()
         .attach(Template::fairing())
         .mount("/static", FileServer::from("static"))
-        .mount("/", routes![index, search, search_query, query])
+        .mount("/", routes![index, empty_search, search, query])
         .ignite()
         .await?
         .launch()
@@ -36,37 +36,38 @@ fn index() -> Template {
     )
 }
 
-#[post("/search")]
-fn search_query() -> Redirect {
-    Redirect::to("/search")
+#[get("/search")]
+fn empty_search() -> Redirect {
+    Redirect::to("/")
 }
 
-#[get("/search")]
-fn search() -> Template {
+#[get("/search?<query>")]
+fn search(query: &str) -> Template {
     Template::render(
         "search",
         context! {
             title: "Search",
-            query_id: 1,
+            query: query,
         },
     )
 }
 
-#[get("/query")]
-fn query<'a>() -> Json<Vec<WebSiteResult>> {
-    Json(vec![WebSiteResult::default(); 20])
-}
+#[get("/query?<query>&<start>&<count>")]
+async fn query<'a>(
+    query: &str,
+    start: usize,
+    count: usize,
+) -> Result<Json<Vec<WebSiteResult>>, String> {
+    // Validate count
+    if count > 25 {
+        return Err("maximum allowed count is 25".into());
+    }
 
-impl Default for WebSiteResult {
-    fn default() -> Self {
-        WebSiteResult {
-            url: String::from("https://example.com"),
-            title: String::from("Some Example Site"),
-            description: String::from(
-                "This is some description of a really long description that could say something like the quick brown fox jumped up and over the moon and never came back. The End",
-            ),
-            engine: Engine::Google,
-            cached: false,
+    match DuckDuckGo::search(query, start, count).await {
+        Ok(results) => Ok(Json(results)),
+        Err(e) => {
+            let err = format!("Engine Error: {:?}", e);
+            Err(err)
         }
     }
 }
@@ -77,12 +78,13 @@ struct WebSiteResult {
     url: String,
     title: String,
     description: String,
-    engine: Engine,
+    engine: EngineName,
     cached: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(crate = "rocket::serde")]
-enum Engine {
+enum EngineName {
     Google,
+    DuckDuckGo,
 }

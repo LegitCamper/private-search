@@ -1,22 +1,28 @@
 {{#*inline "body"}}
 
-<div class="results-container"></div>
+<h3 id="query-header">Query: {{ query }}<h3>
 
-<script type="text/javascript" src="static/search.js"></script>
+    <div class="results-container"></div>
 
-<script>
-  // Server injects this dynamically
-  const QUERY_ID = "{{ query_id }}";
+    <script type="text/javascript" src="static/search.js"></script>
 
-  addEventListener("DOMContentLoaded", (event) => {
-    createSkeletons(20, 0)
-    window.scrollTo(0, 0);
+    <script>
+      addEventListener("DOMContentLoaded", (event) => {
+        createSkeletons(20, 0)
+        window.scrollTo(0, 0);
 
-    if (!QUERY_ID) return;
-    // Start polling and rendering results
-    startPolling(QUERY_ID);
-  });
-</script>
+        // Grab the query text from the h3
+        const queryHeader = document.getElementById("query-header");
+        if (!queryHeader) return;
 
-{{/inline}}
-{{> layout}}
+        // Remove the "Query: " prefix
+        const currentQuery = queryHeader.textContent.replace(/^Query:\s*/, "");
+
+        if (!currentQuery) return;
+        // Start polling and rendering results
+        startPolling(currentQuery);
+      });
+    </script>
+
+    {{/inline}}
+    {{> layout}}

@@ -1,14 +1,13 @@
 const RESULTS_CONTAINER = document.querySelector(".results-container");
 const POLL_INTERVAL = 500; 
-let queryId = null; 
 let lastFetched = 0; 
 let polling = false;
 let skeletons = 0;        // total skeletons created so far
 let batchLoading = false; // prevents multiple skeleton triggers
 
+const numPages = 10;
 
-async function startPolling(qid) {
-  queryId = qid;
+async function startPolling() {
   polling = true;
   pollResults();
 }
@@ -19,16 +18,14 @@ function stopPolling() {
 }
 
 async function pollResults() {
-  if (!polling || !queryId) return;
+  if (!polling || !currentQuery) return;
 
   try {
-    const res = await fetch(`/query?id=${queryId}&from=${lastFetched}`);
+    const res = await fetch(`/query?query=${currentQuery}&start=${lastFetched}&count=${numPages}`);
     if (!res.ok) throw new Error("Failed to fetch results");
 
     const data = await res.json();
-    renderResults(data);
-    
-    lastFetched += 20;
+    renderResults(data);   
     
     if (data.hasMore) {
       setTimeout(pollResults, POLL_INTERVAL);
@@ -108,10 +105,10 @@ window.addEventListener('scroll', () => {
     if (batchLoading) return; // already loading a batch
 
     batchLoading = true; // mark that we are loading
-    createSkeletons(20, skeletons)
+    createSkeletons(numPages, skeletons)
 
     if (!polling) {
-      startPolling(queryId).finally(() => {
+      startPolling().finally(() => {
         batchLoading = false; // ready for next scroll batch
       });
     } else {

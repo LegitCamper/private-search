@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+percent-encoding = "2.3.2"
+reqwest = { version = "0.12.24", features = ["cookies"] }
 rocket = { version = "0.5.1", features = ["json"] }
 rocket_dyn_templates = { version = "0.2.0", features = ["handlebars"] }
+scraper = "0.24.0"
+select = "0.6.1"
 serde = "1.0.228"
-tokio = "1.48.0"
+skyscraper = "0.6.4"
+urlencoding = "2.1.3"
