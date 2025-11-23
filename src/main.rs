@@ -1,4 +1,6 @@
 use rocket::{
+    Request, Response,
+    fairing::{Fairing, Info, Kind},
     fs::FileServer,
     response::Redirect,
     serde::{Serialize, json::Json},
@@ -16,6 +18,7 @@ mod engines;
 async fn main() -> Result<(), rocket::Error> {
     let _rocket = rocket::build()
         .attach(Template::fairing())
+        .attach(CacheFairing)
         .mount("/static", FileServer::from("static"))
         .mount("/", routes![index, empty_search, search, query])
         .ignite()
@@ -24,6 +27,30 @@ async fn main() -> Result<(), rocket::Error> {
         .await?;
 
     Ok(())
+}
+
+pub struct CacheFairing;
+
+#[rocket::async_trait]
+impl Fairing for CacheFairing {
+    fn info(&self) -> Info {
+        Info {
+            name: "Add cache headers to files",
+            kind: Kind::Response,
+        }
+    }
+
+    async fn on_response<'r>(&self, req: &'r Request<'_>, res: &mut Response<'r>) {
+        if req.uri().path().starts_with("/static/")
+            || req.uri().path().starts_with("/search")
+            || req.uri().path() == "/"
+        {
+            res.set_header(rocket::http::Header::new(
+                "Cache-Control",
+                "public, max-age=86400 ",
+            ));
+        }
+    }
 }
 
 #[get("/")]

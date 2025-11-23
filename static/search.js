@@ -15,8 +15,6 @@ addEventListener("DOMContentLoaded", (event) => {
   const query = params.get("q") || "";
   document.querySelector(".search-bar").value = query;
 
-  console.log("current query: ${query}")
-
   // Start polling and rendering results
   startPolling(query);
 });
