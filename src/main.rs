@@ -41,13 +41,13 @@ fn empty_search() -> Redirect {
     Redirect::to("/")
 }
 
-#[get("/search?<query>")]
-fn search(query: &str) -> Template {
+#[allow(unused_variables)]
+#[get("/search?<q>")]
+fn search(q: &str) -> Template {
     Template::render(
         "search",
         context! {
             title: "Search",
-            query: query,
         },
     )
 }
@@ -58,18 +58,20 @@ async fn query<'a>(
     start: usize,
     count: usize,
 ) -> Result<Json<Vec<WebSiteResult>>, String> {
-    // Validate count
-    if count > 25 {
-        return Err("maximum allowed count is 25".into());
-    }
+    // // Validate count
+    // if count > 25 {
+    //     return Err("maximum allowed count is 25".into());
+    // }
 
-    match DuckDuckGo::search(query, start, count).await {
-        Ok(results) => Ok(Json(results)),
-        Err(e) => {
-            let err = format!("Engine Error: {:?}", e);
-            Err(err)
-        }
-    }
+    // match DuckDuckGo::search(query, start, count).await {
+    //     Ok(results) => Ok(Json(results)),
+    //     Err(e) => {
+    //         let err = format!("Engine Error: {:?}", e);
+    //         Err(err)
+    //     }
+    // }
+    //
+    Err("Not working".into())
 }
 
 #[derive(Debug, Clone, Serialize)]

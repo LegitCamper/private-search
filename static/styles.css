@@ -12,7 +12,7 @@ html, body {
     align-items: center;
 }
 
-.search-bar {
+.homepage-bar {
     max-width: 500px;
     margin: 0 auto;
     width: 95%;
@@ -23,16 +23,30 @@ html, body {
     background-color: #505050;
 }
 
+.search-bar-container,
 .results-container {
     max-width: 700px;
-    margin: 0 auto;
     width: 95%;
+    margin: 0 auto;
+}
+
+.search-bar {
+    width: 100%; 
+    padding: 12px 20px;
+    font-size: 18px;
+    border-radius: 8px;
+    border: 1px solid #ccc;
+    background-color: #505050;
+    color: #fff;
+    box-sizing: border-box; 
+}
+
+.results-container {
     display: flex;
     flex-direction: column;
     gap: 1rem;
-    padding: 1rem;
-    min-height: 100vh;
-    color: #cdd6f4; 
+    padding-top: 1rem;
+    color: #cdd6f4;
     font-family: 'Inter', sans-serif;
 }
 

@@ -1,28 +1,15 @@
 {{#*inline "body"}}
 
-<h3 id="query-header">Query: {{ query }}<h3>
+<script type="text/javascript" src="static/search.js"></script>
 
-    <div class="results-container"></div>
+<div class="search-bar-container">
+  <form action="/search" method="get">
+    <input type="text" class="search-bar" placeholder="Search for..." name="q">
+  </form>
+</div>
 
-    <script type="text/javascript" src="static/search.js"></script>
+<div class="results-container"></div>
 
-    <script>
-      addEventListener("DOMContentLoaded", (event) => {
-        createSkeletons(20, 0)
-        window.scrollTo(0, 0);
 
-        // Grab the query text from the h3
-        const queryHeader = document.getElementById("query-header");
-        if (!queryHeader) return;
-
-        // Remove the "Query: " prefix
-        const currentQuery = queryHeader.textContent.replace(/^Query:\s*/, "");
-
-        if (!currentQuery) return;
-        // Start polling and rendering results
-        startPolling(currentQuery);
-      });
-    </script>
-
-    {{/inline}}
-    {{> layout}}
+{{/inline}}
+{{> layout}}

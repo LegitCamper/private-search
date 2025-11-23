@@ -1,15 +1,29 @@
 const RESULTS_CONTAINER = document.querySelector(".results-container");
 const POLL_INTERVAL = 500; 
+const numPages = 10;
+
 let lastFetched = 0; 
 let polling = false;
 let skeletons = 0;        // total skeletons created so far
 let batchLoading = false; // prevents multiple skeleton triggers
 
-const numPages = 10;
+addEventListener("DOMContentLoaded", (event) => {
+  createSkeletons(numPages, 0)
+  window.scrollTo(0, 0);
 
-async function startPolling() {
+  const params = new URLSearchParams(location.search);
+  const query = params.get("q") || "";
+  document.querySelector(".search-bar").value = query;
+
+  console.log("current query: ${query}")
+
+  // Start polling and rendering results
+  startPolling(query);
+});
+
+async function startPolling(query) {
   polling = true;
-  pollResults();
+  pollResults(query);
 }
 
 function stopPolling() {
@@ -17,11 +31,11 @@ function stopPolling() {
   batchLoading = false;
 }
 
-async function pollResults() {
-  if (!polling || !currentQuery) return;
+async function pollResults(query) {
+  if (!polling) return;
 
   try {
-    const res = await fetch(`/query?query=${currentQuery}&start=${lastFetched}&count=${numPages}`);
+    const res = await fetch(`/query?query=${query}&start=${lastFetched}&count=${numPages}`);
     if (!res.ok) throw new Error("Failed to fetch results");
 
     const data = await res.json();
