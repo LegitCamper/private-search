@@ -18,6 +18,10 @@ pub struct DuckDuckGo {
 impl Engine for DuckDuckGo {
     type Error = Error;
 
+    fn engine() -> super::Engines {
+        super::Engines::DuckDuckGo
+    }
+
     async fn search(
         query: &str,
         start: usize,

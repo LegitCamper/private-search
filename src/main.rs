@@ -1,13 +1,14 @@
 use rocket::{
-    Request, Response,
+    Request, Response, State,
     fairing::{Fairing, Info, Kind},
     fs::FileServer,
     response::Redirect,
     serde::{Serialize, json::Json},
 };
 use rocket_dyn_templates::{Template, context};
+use sqlx::SqlitePool;
 
-use crate::engines::{Engine, Engines, duckduckgo::DuckDuckGo};
+use crate::engines::{Engine, Engines, duckduckgo::DuckDuckGo, fetch_or_cache_query};
 
 #[macro_use]
 extern crate rocket;
@@ -17,13 +18,14 @@ mod engines;
 
 #[rocket::main]
 async fn main() -> Result<(), rocket::Error> {
-    let db_conn = cache::init();
+    let db_conn = cache::init().await.expect("DB Failed to Initialize");
 
     let _rocket = rocket::build()
         .attach(Template::fairing())
         .attach(CacheFairing)
         .mount("/static", FileServer::from("static"))
         .mount("/", routes![index, empty_search, search, query])
+        .manage(db_conn)
         .ignite()
         .await?
         .launch()
@@ -84,24 +86,21 @@ fn search(q: &str) -> Template {
 
 #[get("/query?<query>&<start>&<count>")]
 async fn query<'a>(
+    pool: &State<SqlitePool>,
     query: &str,
     start: usize,
     count: usize,
 ) -> Result<Json<Vec<WebSiteResult>>, String> {
-    // // Validate count
-    // if count > 25 {
-    //     return Err("maximum allowed count is 25".into());
-    // }
+    // Validate count
+    if count > 25 {
+        return Err("maximum allowed count is 25".into());
+    }
 
-    // match DuckDuckGo::search(query, start, count).await {
-    //     Ok(results) => Ok(Json(results)),
-    //     Err(e) => {
-    //         let err = format!("Engine Error: {:?}", e);
-    //         Err(err)
-    //     }
-    // }
-    //
-    Err("Not working".into())
+    Ok(Json(
+        fetch_or_cache_query::<DuckDuckGo>(&pool, query, start, count)
+            .await
+            .map_err(|_| "Failed")?,
+    ))
 }
 
 #[derive(Debug, Clone, Serialize)]

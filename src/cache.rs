@@ -175,8 +175,18 @@ pub async fn insert_query(
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EngineResultRow {
     pub url: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
+    pub title: String,
+    pub description: String,
+}
+
+impl Into<EngineResult> for EngineResultRow {
+    fn into(self) -> EngineResult {
+        EngineResult {
+            url: self.url,
+            title: self.title,
+            description: self.description,
+        }
+    }
 }
 
 pub async fn get_results_for_query(
@@ -328,8 +338,8 @@ mod test {
 
         for (i, r) in results.iter().enumerate() {
             assert_eq!(fetched[i].url, r.url);
-            assert_eq!(fetched[i].title.as_deref().unwrap(), r.title);
-            assert_eq!(fetched[i].description.as_deref().unwrap(), r.description);
+            assert_eq!(fetched[i].title, r.title);
+            assert_eq!(fetched[i].description, r.description);
         }
     }
 
