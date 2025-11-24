@@ -7,12 +7,16 @@ let polling = false;
 let skeletons = 0;        // total skeletons created so far
 let batchLoading = false; // prevents multiple skeleton triggers
 
+function get_query() {
+  let params = new URLSearchParams(location.search);
+  return params.get("q") || "";
+}
+
 addEventListener("DOMContentLoaded", (event) => {
   createSkeletons(numPages, 0)
   window.scrollTo(0, 0);
 
-  const params = new URLSearchParams(location.search);
-  const query = params.get("q") || "";
+  let query = get_query();
   document.querySelector(".search-bar").value = query;
 
   startPolling(query);
@@ -54,7 +58,6 @@ function renderResults(results) {
   results.forEach((result, idx) => {
     // Compute which skeleton to fill
     const skeletonId = lastFetched + idx;
-    console.log(results)
     let skeleton = RESULTS_CONTAINER.querySelector(`.result-skeleton[data-result-id="${skeletonId}"]`);
 
     if (!skeleton) {
@@ -120,11 +123,11 @@ window.addEventListener('scroll', () => {
     createSkeletons(numPages, skeletons)
 
     if (!polling) {
-      startPolling().finally(() => {
+      startPolling(get_query()).finally(() => {
         batchLoading = false; // ready for next scroll batch
       });
     } else {
-      setTimeout(() => batchLoading = false, 500);
+      setTimeout(() => batchLoading = false, POLL_INTERVAL);
     }
   }
 });

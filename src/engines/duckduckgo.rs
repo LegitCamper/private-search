@@ -1,14 +1,22 @@
+use lazy_static::lazy_static;
 use percent_encoding::percent_decode;
-use reqwest::{Client, Url};
+use regex::Regex;
+use reqwest::{Client, StatusCode, Url};
+use rocket::tokio::sync::Mutex;
 use scraper::{ElementRef, Html, Selector};
 use std::collections::HashMap;
 
 use crate::engines::{Engine, EngineResult};
 
+lazy_static! {
+    static ref DDG_VQD: Mutex<Option<String>> = Mutex::new(None);
+}
+
 #[derive(Debug)]
 pub enum Error {
     ReqwestError(reqwest::Error),
     ParseError(String),
+    VqdUnknown,
 }
 
 pub struct DuckDuckGo {
@@ -29,31 +37,18 @@ impl Engine for DuckDuckGo {
     ) -> Result<Vec<EngineResult>, Self::Error> {
         let want_total = start + need;
         let mut results: Vec<EngineResult> = Vec::new();
+        let mut page_results = 0;
         let client = Client::new();
 
-        // Get first page first
-        let first_html = client
-            .get(&format!("https://html.duckduckgo.com/html/?q={}", query))
-            .send()
-            .await
-            .map_err(Error::ReqwestError)?
-            .text()
-            .await
-            .map_err(Error::ReqwestError)?;
-
-        let mut parsed = Self::parse(&mut results, &first_html)?;
-        if parsed == 0 {
-            return Err(Self::Error::ParseError("first page empty".into()));
-        }
-
-        let mut offset = results.len();
+        let vqd = Self::get_vqd(query).await?;
 
         while results.len() < want_total {
-            let s = offset.to_string();
+            let s = page_results.to_string();
             let mut form = HashMap::new();
             form.insert("q", query);
             form.insert("kl", "us-en");
             form.insert("s", &s);
+            form.insert("vqd", &vqd);
 
             let html = client
                 .post("https://html.duckduckgo.com/html/")
@@ -65,14 +60,7 @@ impl Engine for DuckDuckGo {
                 .await
                 .map_err(Error::ReqwestError)?;
 
-            parsed = Self::parse(&mut results, &html)?;
-
-            // DuckDuckGo sometimes returns nothing on edge offsets
-            if parsed == 0 {
-                break; // prevent infinite loop
-            }
-
-            offset += parsed;
+            page_results += Self::parse(&mut results, &html)?;
         }
 
         let end = (start + need).min(results.len());
@@ -83,6 +71,35 @@ impl Engine for DuckDuckGo {
 }
 
 impl DuckDuckGo {
+    async fn get_vqd(query: &str) -> Result<String, Error> {
+        let mut vqd_guard = DDG_VQD.lock().await;
+        if let Some(v) = &*vqd_guard {
+            return Ok(v.clone());
+        } else {
+            let resp = reqwest::get(&format!("https://duckduckgo.com/q?={}", query))
+                .await
+                .map_err(Error::ReqwestError)?;
+
+            if resp.status() == StatusCode::OK {
+                let html = resp.text().await.map_err(Error::ReqwestError)?;
+                match Self::extract_vqd(&html) {
+                    Some(new_vqd) => {
+                        *vqd_guard = Some(new_vqd.clone());
+                        return Ok(new_vqd);
+                    }
+                    None => return Err(Error::VqdUnknown),
+                }
+            }
+        }
+        Err(Error::VqdUnknown)
+    }
+
+    fn extract_vqd(script_html: &str) -> Option<String> {
+        let re = Regex::new(r#"vqd\s*=\s*"([0-9-]+)""#).ok()?;
+        let caps = re.captures(script_html)?;
+        Some(caps[1].to_string())
+    }
+
     fn parse(results: &mut Vec<EngineResult>, document: &str) -> Result<usize, Error> {
         let mut number_results = 0;
 
@@ -202,7 +219,7 @@ impl DuckDuckGo {
     }
 
     fn is_sponsored(ddg_href: &str) -> bool {
-        if ddg_href.contains("?ad_domain") || ddg_href.contains("ad_provider") {
+        if ddg_href.contains("?ad_domain") || ddg_href.contains("?ad_provider") {
             return true;
         }
         false
