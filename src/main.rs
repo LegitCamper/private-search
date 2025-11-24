@@ -7,15 +7,18 @@ use rocket::{
 };
 use rocket_dyn_templates::{Template, context};
 
-use crate::engines::{Engine, duckduckgo::DuckDuckGo};
+use crate::engines::{Engine, Engines, duckduckgo::DuckDuckGo};
 
 #[macro_use]
 extern crate rocket;
 
+mod cache;
 mod engines;
 
 #[rocket::main]
 async fn main() -> Result<(), rocket::Error> {
+    let db_conn = cache::init();
+
     let _rocket = rocket::build()
         .attach(Template::fairing())
         .attach(CacheFairing)
@@ -107,13 +110,6 @@ struct WebSiteResult {
     url: String,
     title: String,
     description: String,
-    engine: EngineName,
+    engine: Engines,
     cached: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(crate = "rocket::serde")]
-enum EngineName {
-    Google,
-    DuckDuckGo,
 }

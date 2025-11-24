@@ -1,13 +1,9 @@
+use percent_encoding::percent_decode;
+use reqwest::{Client, Url};
+use scraper::{ElementRef, Html, Selector};
 use std::collections::HashMap;
 
-use percent_encoding::percent_decode;
-use reqwest::{
-    Client, Url,
-    header::{ACCEPT, ACCEPT_LANGUAGE, USER_AGENT},
-};
-use scraper::{ElementRef, Html, Selector};
-
-use crate::{EngineName, WebSiteResult, engines::Engine};
+use crate::engines::{Engine, EngineResult};
 
 #[derive(Debug)]
 pub enum Error {
@@ -26,9 +22,9 @@ impl Engine for DuckDuckGo {
         query: &str,
         start: usize,
         need: usize,
-    ) -> Result<Vec<WebSiteResult>, Self::Error> {
+    ) -> Result<Vec<EngineResult>, Self::Error> {
         let want_total = start + need;
-        let mut results: Vec<WebSiteResult> = Vec::new();
+        let mut results: Vec<EngineResult> = Vec::new();
         let client = Client::new();
 
         // Get first page first
@@ -83,7 +79,7 @@ impl Engine for DuckDuckGo {
 }
 
 impl DuckDuckGo {
-    fn parse(results: &mut Vec<WebSiteResult>, document: &str) -> Result<usize, Error> {
+    fn parse(results: &mut Vec<EngineResult>, document: &str) -> Result<usize, Error> {
         let mut number_results = 0;
 
         let links_sel = Selector::parse("#links").unwrap();
@@ -113,12 +109,10 @@ impl DuckDuckGo {
                 let snippet = Self::extract_snippet(&result);
 
                 number_results += 1;
-                results.push(WebSiteResult {
+                results.push(EngineResult {
                     url,
                     title,
                     description: snippet,
-                    engine: EngineName::DuckDuckGo,
-                    cached: false,
                 });
             }
         }
