@@ -33,7 +33,7 @@ impl Engine for DuckDuckGo {
 
         // Get first page first
         let first_html = client
-            .get(&format!("https://duckduckgo.com/html/?q={}", query))
+            .get(&format!("https://html.duckduckgo.com/html/?q={}", query))
             .send()
             .await
             .map_err(Error::ReqwestError)?
@@ -56,7 +56,7 @@ impl Engine for DuckDuckGo {
             form.insert("s", &s);
 
             let html = client
-                .post("https://duckduckgo.com/html/")
+                .post("https://html.duckduckgo.com/html/")
                 .form(&form)
                 .send()
                 .await
@@ -109,6 +109,10 @@ impl DuckDuckGo {
                     .and_then(|u| u.value().attr("href"))
                     .map(|href| Self::extract_ddg_url(href).unwrap_or_else(|| href.to_string()))
                     .unwrap_or_default();
+
+                if Self::is_sponsored(&url) {
+                    continue;
+                }
 
                 let snippet = Self::extract_snippet(&result);
 
@@ -195,5 +199,12 @@ impl DuckDuckGo {
             }
         }
         Some(ddg_href.to_string()) // fallback to raw href
+    }
+
+    fn is_sponsored(ddg_href: &str) -> bool {
+        if ddg_href.contains("?ad_domain") || ddg_href.contains("ad_provider") {
+            return true;
+        }
+        false
     }
 }

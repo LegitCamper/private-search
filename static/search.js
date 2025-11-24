@@ -15,7 +15,6 @@ addEventListener("DOMContentLoaded", (event) => {
   const query = params.get("q") || "";
   document.querySelector(".search-bar").value = query;
 
-  // Start polling and rendering results
   startPolling(query);
 });
 
@@ -30,7 +29,7 @@ function stopPolling() {
 }
 
 async function pollResults(query) {
-  if (!polling) return;
+  if (!polling || query === undefined || query === null) return;
 
   try {
     const res = await fetch(`/query?query=${query}&start=${lastFetched}&count=${numPages}`);
@@ -55,6 +54,7 @@ function renderResults(results) {
   results.forEach((result, idx) => {
     // Compute which skeleton to fill
     const skeletonId = lastFetched + idx;
+    console.log(results)
     let skeleton = RESULTS_CONTAINER.querySelector(`.result-skeleton[data-result-id="${skeletonId}"]`);
 
     if (!skeleton) {

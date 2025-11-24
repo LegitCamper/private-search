@@ -85,7 +85,7 @@ fn search(q: &str) -> Template {
 }
 
 #[get("/query?<query>&<start>&<count>")]
-async fn query<'a>(
+async fn query(
     pool: &State<SqlitePool>,
     query: &str,
     start: usize,
@@ -96,11 +96,25 @@ async fn query<'a>(
         return Err("maximum allowed count is 25".into());
     }
 
-    Ok(Json(
-        fetch_or_cache_query::<DuckDuckGo>(&pool, query, start, count)
-            .await
-            .map_err(|_| "Failed")?,
-    ))
+    println!("query: {}, start: {}, count: {}", query, start, count);
+
+    let results = fetch_or_cache_query::<DuckDuckGo>(&pool, query, start, count)
+        .await
+        .map_err(|e| {
+            match e {
+                engines::FetchCacheError::Sqlx(error) => {
+                    eprint!("Sql Error: {}", error)
+                }
+                engines::FetchCacheError::Engine(error) => {
+                    eprint!("Engine Error: {:?}", error)
+                }
+            }
+            "Query Error".to_string()
+        })?;
+
+    println!("res: {:?}", results);
+
+    Ok(Json(results))
 }
 
 #[derive(Debug, Clone, Serialize)]
