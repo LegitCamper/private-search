@@ -1,7 +1,9 @@
+use rocket::serde;
+use serde::Serialize;
 use sqlx::{SqlitePool, prelude::FromRow};
 use strum::IntoEnumIterator;
 
-use crate::engines::{EngineResult, Engines};
+use crate::engines::Engines;
 
 const SQLITE_DB_NAME: &'static str = "cache.db";
 
@@ -65,7 +67,7 @@ pub async fn upsert_query_with_results(
     pool: &SqlitePool,
     engine: Engines,
     query: &str,
-    entries: Vec<EngineResult>,
+    entries: Vec<ResultRow>,
     fetched_at: chrono::NaiveDateTime,
 ) -> Result<i64, sqlx::Error> {
     let engine_id = get_engine_id(pool, engine).await?;
@@ -172,28 +174,19 @@ pub async fn insert_query(
     Ok(id)
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct EngineResultRow {
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[serde(crate = "rocket::serde")]
+pub struct ResultRow {
     pub url: String,
     pub title: String,
     pub description: String,
 }
 
-impl Into<EngineResult> for EngineResultRow {
-    fn into(self) -> EngineResult {
-        EngineResult {
-            url: self.url,
-            title: self.title,
-            description: self.description,
-        }
-    }
-}
-
 pub async fn get_results_for_query(
     pool: &SqlitePool,
     query_id: i64,
-) -> Result<Vec<EngineResultRow>, sqlx::Error> {
-    let rows: Vec<EngineResultRow> = sqlx::query_as(
+) -> Result<Vec<ResultRow>, sqlx::Error> {
+    let rows: Vec<ResultRow> = sqlx::query_as(
         r#"
         SELECT r.url, r.title, r.description
         FROM results r
@@ -277,8 +270,8 @@ pub async fn get_result_for_query(
 #[cfg(test)]
 mod test {
     use crate::{
-        cache::{create_search_cache, get_results_for_query, upsert_query_with_results},
-        engines::{EngineResult, Engines},
+        cache::{ResultRow, create_search_cache, get_results_for_query, upsert_query_with_results},
+        engines::Engines,
     };
     use chrono::Utc;
     use sqlx::SqlitePool;
@@ -291,19 +284,19 @@ mod test {
         pool
     }
 
-    fn sample_results() -> Vec<EngineResult> {
+    fn sample_results() -> Vec<ResultRow> {
         vec![
-            EngineResult {
+            ResultRow {
                 url: "https://example.com".into(),
                 title: "Example 1".into(),
                 description: "First description".into(),
             },
-            EngineResult {
+            ResultRow {
                 url: "https://super.com".into(),
                 title: "Example 2".into(),
                 description: "Second description".into(),
             },
-            EngineResult {
+            ResultRow {
                 url: "https://mega.com".into(),
                 title: "Example 3".into(),
                 description: "Third description".into(),
@@ -375,12 +368,12 @@ mod test {
         let pool = new_db().await;
         let page1 = sample_results();
         let page2 = vec![
-            EngineResult {
+            ResultRow {
                 url: "https://extra.com".into(),
                 title: "Extra 1".into(),
                 description: "Extra description".into(),
             },
-            EngineResult {
+            ResultRow {
                 url: "https://more.com".into(),
                 title: "Extra 2".into(),
                 description: "More description".into(),

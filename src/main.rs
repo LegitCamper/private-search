@@ -1,14 +1,17 @@
+use std::{ops::DerefMut, sync::Arc};
+
 use rocket::{
     Request, Response, State,
     fairing::{Fairing, Info, Kind},
     fs::FileServer,
+    futures::lock::Mutex,
     response::Redirect,
     serde::{Serialize, json::Json},
 };
 use rocket_dyn_templates::{Template, context};
 use sqlx::SqlitePool;
 
-use crate::engines::{Engine, Engines, duckduckgo::DuckDuckGo, fetch_or_cache_query};
+use crate::engines::{Engines, duckduckgo::DuckDuckGo, fetch_or_cache_query};
 
 #[macro_use]
 extern crate rocket;
@@ -20,12 +23,15 @@ mod engines;
 async fn main() -> Result<(), rocket::Error> {
     let db_conn = cache::init().await.expect("DB Failed to Initialize");
 
+    let ddg = Arc::new(Mutex::new(DuckDuckGo::new()));
+
     let _rocket = rocket::build()
         .attach(Template::fairing())
         .attach(CacheFairing)
         .mount("/static", FileServer::from("static"))
         .mount("/", routes![index, empty_search, search, query])
         .manage(db_conn)
+        .manage(ddg)
         .ignite()
         .await?
         .launch()
@@ -87,6 +93,7 @@ fn search(q: &str) -> Template {
 #[get("/query?<query>&<start>&<count>")]
 async fn query(
     pool: &State<SqlitePool>,
+    ddg: &State<Arc<Mutex<DuckDuckGo>>>,
     query: &str,
     start: usize,
     count: usize,
@@ -98,14 +105,16 @@ async fn query(
 
     println!("query: {}, start: {}, count: {}", query, start, count);
 
-    let results = fetch_or_cache_query::<DuckDuckGo>(&pool, query, start, count)
+    let mut ddg = ddg.lock().await;
+
+    let results = fetch_or_cache_query(&pool, ddg.deref_mut(), query, start, count)
         .await
         .map_err(|e| {
             match e {
-                engines::FetchCacheError::Sqlx(error) => {
+                engines::FetchError::Sqlx(error) => {
                     eprint!("Sql Error: {}", error)
                 }
-                engines::FetchCacheError::Engine(error) => {
+                engines::FetchError::Engine(error) => {
                     eprint!("Engine Error: {:?}", error)
                 }
             }

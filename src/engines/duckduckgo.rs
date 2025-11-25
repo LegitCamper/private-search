@@ -1,46 +1,67 @@
-use lazy_static::lazy_static;
+use chrono::{NaiveDateTime, Utc};
 use percent_encoding::percent_decode;
 use regex::Regex;
 use reqwest::{Client, StatusCode, Url};
-use rocket::tokio::sync::Mutex;
 use scraper::{ElementRef, Html, Selector};
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
-use crate::engines::{Engine, EngineResult};
-
-lazy_static! {
-    static ref DDG_VQD: Mutex<Option<String>> = Mutex::new(None);
-}
+use crate::engines::{Engine, EngineError, EngineState, Engines, cache::ResultRow};
 
 #[derive(Debug)]
 pub enum Error {
-    ReqwestError(reqwest::Error),
-    ParseError(String),
     VqdUnknown,
 }
 
+const TIMEOUT: u64 = 2; // seconds
+const TIMEOUT_LEN: u64 = 60; // time (min) before engine is available again
+const COOLDOWN: u64 = 2; // seconds
+
 pub struct DuckDuckGo {
-    documents: Vec<String>,
+    vqd: Option<String>,
+    state: EngineState,
+    cooldown: Option<NaiveDateTime>,
 }
 
 impl Engine for DuckDuckGo {
     type Error = Error;
 
-    fn engine() -> super::Engines {
-        super::Engines::DuckDuckGo
+    fn name(&self) -> Engines {
+        Engines::DuckDuckGo
+    }
+
+    fn is_available(&mut self) -> bool {
+        let now = Utc::now().naive_utc();
+
+        if let EngineState::TimedOut { available_at } = self.state {
+            if now >= available_at {
+                self.state = EngineState::Healthy;
+            }
+        }
+
+        if let Some(available_at) = self.cooldown {
+            if now >= available_at {
+                self.cooldown = None;
+            }
+        }
+
+        matches!(self.state, EngineState::Healthy) && self.cooldown.is_none()
     }
 
     async fn search(
+        &mut self,
         query: &str,
         start: usize,
         need: usize,
-    ) -> Result<Vec<EngineResult>, Self::Error> {
+    ) -> Result<Vec<ResultRow>, EngineError<Error>> {
         let want_total = start + need;
-        let mut results: Vec<EngineResult> = Vec::new();
+        let mut results: Vec<ResultRow> = Vec::new();
         let mut page_results = 0;
-        let client = Client::new();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(TIMEOUT))
+            .build()
+            .map_err(EngineError::ReqwestError)?;
 
-        let vqd = Self::get_vqd(query).await?;
+        let vqd = self.get_vqd(query).await?;
 
         while results.len() < want_total {
             let s = page_results.to_string();
@@ -50,15 +71,31 @@ impl Engine for DuckDuckGo {
             form.insert("s", &s);
             form.insert("vqd", &vqd);
 
-            let html = client
+            let req = client
                 .post("https://html.duckduckgo.com/html/")
                 .form(&form)
                 .send()
-                .await
-                .map_err(Error::ReqwestError)?
-                .text()
-                .await
-                .map_err(Error::ReqwestError)?;
+                .await;
+
+            let resp = match req {
+                Ok(resp) => {
+                    self.cooldown = Some((Utc::now() + Duration::from_secs(COOLDOWN)).naive_utc());
+                    resp
+                }
+                Err(e) => {
+                    if e.is_timeout() {
+                        self.state = EngineState::TimedOut {
+                            available_at: (Utc::now() + Duration::from_mins(TIMEOUT_LEN))
+                                .naive_utc(),
+                        };
+                        return Err(EngineError::Timeout);
+                    } else {
+                        return Err(EngineError::ReqwestError(e));
+                    }
+                }
+            };
+
+            let html = resp.text().await.map_err(EngineError::ReqwestError)?;
 
             page_results += Self::parse(&mut results, &html)?;
         }
@@ -71,27 +108,34 @@ impl Engine for DuckDuckGo {
 }
 
 impl DuckDuckGo {
-    async fn get_vqd(query: &str) -> Result<String, Error> {
-        let mut vqd_guard = DDG_VQD.lock().await;
-        if let Some(v) = &*vqd_guard {
+    pub fn new() -> Self {
+        Self {
+            vqd: None,
+            state: EngineState::Healthy,
+            cooldown: None,
+        }
+    }
+
+    async fn get_vqd(&mut self, query: &str) -> Result<String, EngineError<Error>> {
+        if let Some(v) = &self.vqd {
             return Ok(v.clone());
         } else {
             let resp = reqwest::get(&format!("https://duckduckgo.com/q?={}", query))
                 .await
-                .map_err(Error::ReqwestError)?;
+                .map_err(EngineError::ReqwestError)?;
 
             if resp.status() == StatusCode::OK {
-                let html = resp.text().await.map_err(Error::ReqwestError)?;
+                let html = resp.text().await.map_err(EngineError::ReqwestError)?;
                 match Self::extract_vqd(&html) {
                     Some(new_vqd) => {
-                        *vqd_guard = Some(new_vqd.clone());
+                        self.vqd = Some(new_vqd.clone());
                         return Ok(new_vqd);
                     }
-                    None => return Err(Error::VqdUnknown),
+                    None => return Err(EngineError::EngineSpecificError(Error::VqdUnknown)),
                 }
             }
         }
-        Err(Error::VqdUnknown)
+        Err(EngineError::EngineSpecificError(Error::VqdUnknown))
     }
 
     fn extract_vqd(script_html: &str) -> Option<String> {
@@ -100,7 +144,7 @@ impl DuckDuckGo {
         Some(caps[1].to_string())
     }
 
-    fn parse(results: &mut Vec<EngineResult>, document: &str) -> Result<usize, Error> {
+    fn parse(results: &mut Vec<ResultRow>, document: &str) -> Result<usize, EngineError<Error>> {
         let mut number_results = 0;
 
         let links_sel = Selector::parse("#links").unwrap();
@@ -134,7 +178,7 @@ impl DuckDuckGo {
                 let snippet = Self::extract_snippet(&result);
 
                 number_results += 1;
-                results.push(EngineResult {
+                results.push(ResultRow {
                     url,
                     title,
                     description: snippet,
