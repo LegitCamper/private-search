@@ -6,24 +6,23 @@ use rocket::{
     fs::FileServer,
     futures::lock::Mutex,
     response::Redirect,
-    serde::{Serialize, json::Json},
+    serde::json::Json,
 };
 use rocket_dyn_templates::{Template, context};
-use sqlx::SqlitePool;
 
-use crate::engines::{Engines, duckduckgo::DuckDuckGo, fetch_or_cache_query};
+use private_search_engines::{
+    SearchResult,
+    engines::{Brave, DuckDuckGo, FetchError, fetch_or_cache_query},
+    init_cache,
+    sqlx::sqlite::SqlitePool,
+};
 
 #[macro_use]
 extern crate rocket;
 
-mod cache;
-mod engines;
-
 #[rocket::main]
 async fn main() -> Result<(), rocket::Error> {
-    let db_conn = cache::init().await.expect("DB Failed to Initialize");
-
-    let ddg = Arc::new(Mutex::new(DuckDuckGo::new()));
+    let db_conn = init_cache().await.expect("DB Failed to Initialize");
 
     let _rocket = rocket::build()
         .attach(Template::fairing())
@@ -31,7 +30,6 @@ async fn main() -> Result<(), rocket::Error> {
         .mount("/static", FileServer::from("static"))
         .mount("/", routes![index, empty_search, search, query])
         .manage(db_conn)
-        .manage(ddg)
         .ignite()
         .await?
         .launch()
@@ -93,11 +91,10 @@ fn search(q: &str) -> Template {
 #[get("/query?<query>&<start>&<count>")]
 async fn query(
     pool: &State<SqlitePool>,
-    ddg: &State<Arc<Mutex<DuckDuckGo>>>,
     query: &str,
     start: usize,
     count: usize,
-) -> Result<Json<Vec<WebSiteResult>>, String> {
+) -> Result<Json<Vec<SearchResult>>, String> {
     // Validate count
     if count > 25 {
         return Err("maximum allowed count is 25".into());
@@ -105,16 +102,14 @@ async fn query(
 
     println!("query: {}, start: {}, count: {}", query, start, count);
 
-    let mut ddg = ddg.lock().await;
-
-    let results = fetch_or_cache_query(&pool, ddg.deref_mut(), query, start, count)
+    let results = fetch_or_cache_query::<Brave>(&pool, query, start, count)
         .await
         .map_err(|e| {
             match e {
-                engines::FetchError::Sqlx(error) => {
+                FetchError::Sqlx(error) => {
                     eprint!("Sql Error: {}", error)
                 }
-                engines::FetchError::Engine(error) => {
+                FetchError::Engine(error) => {
                     eprint!("Engine Error: {:?}", error)
                 }
             }
@@ -124,14 +119,4 @@ async fn query(
     println!("res: {:?}", results);
 
     Ok(Json(results))
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(crate = "rocket::serde")]
-struct WebSiteResult {
-    url: String,
-    title: String,
-    description: String,
-    engine: Engines,
-    cached: bool,
 }
