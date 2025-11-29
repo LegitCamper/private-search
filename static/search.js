@@ -68,14 +68,18 @@ function renderResults(results) {
       RESULTS_CONTAINER.appendChild(skeleton);
     }
 
+    const enginesHtml = result.engines
+      .map(e => `<span class="engine-tag">${e}</span>`)
+      .join(" ");
+
     // Fill content
     skeleton.innerHTML = `
       <a class="url_header" href="${result.url}">${result.url}</a>
       <h3><a class="name" href="${result.url}">${result.title}</a></h3>
       <p class="description">${result.description}</p>
       <div class="engines">
-        <span>${result.engine}</span>
-        ${result.cached ? '<span>Cached ✓</span>' : ''}
+        ${enginesHtml}
+        ${result.cached ? '<span class="engine-tag cached">Cached ✓</span>' : ''}
       </div>
     `;
     skeleton.className = "result"; // remove skeleton styles

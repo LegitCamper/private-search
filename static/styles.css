@@ -96,6 +96,18 @@ html, body {
     gap: 0.5rem;
 }
 
+.engine-tag {
+    display: inline-block;
+    padding: 3px 6px;
+    margin-right: 4px;
+    border-radius: 4px;
+    font-size: 0.8em;
+}
+
+.engine-tag.cached {
+    background: #c7f5c7;
+}
+
 .skeleton {
     background: linear-gradient(
         90deg,
