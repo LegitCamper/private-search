@@ -11,9 +11,7 @@ use rocket::{
 use rocket_dyn_templates::{Template, context};
 
 use private_search_engines::{
-    SearchResult,
-    engines::{Brave, DuckDuckGo, FetchError, fetch_or_cache_query},
-    init_cache,
+    FetchError, SearchResult, engines::Brave, fetch_or_cache_query, init_cache,
     sqlx::sqlite::SqlitePool,
 };
 
