@@ -84,8 +84,15 @@ fn search(t: Option<String>, q: &str) -> Template {
     )
 }
 
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+pub enum QueryResults {
+    General(Vec<SearchResult>),
+    // Images(Vec<ImageResult>),
+}
+
 #[get("/query?<query>&<start>&<count>")]
-async fn query(query: &str, start: usize, count: usize) -> Result<Json<Vec<SearchResult>>, String> {
+async fn query(query: &str, start: usize, count: usize) -> Result<Json<QueryResults>, String> {
     // Validate count
     if count > 25 {
         return Err("maximum allowed count is 25".into());
@@ -118,5 +125,5 @@ async fn query(query: &str, start: usize, count: usize) -> Result<Json<Vec<Searc
 
     println!("res: {:?}", results);
 
-    Ok(Json(results))
+    Ok(Json(QueryResults::General(results)))
 }

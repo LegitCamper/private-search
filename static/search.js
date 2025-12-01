@@ -47,6 +47,17 @@ function stopPolling() {
   batchLoading = false;
 }
 
+function unwrapResults(obj) {
+  if (!obj || typeof obj !== "object") return [];
+
+  if (obj.General) return obj.General;
+  if (obj.Images) return obj.Images;
+  if (obj.Cs) return obj.Cs;
+
+  console.warn("Unknown response variant:", obj);
+  return [];
+}
+
 async function pollResults(query) {
   if (!polling || query === undefined || query === null) return;
 
@@ -55,7 +66,9 @@ async function pollResults(query) {
     if (!res.ok) throw new Error("Failed to fetch results");
 
     const data = await res.json();
-    renderResults(data);   
+    const results = unwrapResults(data);
+
+    renderResults(results);   
     
     if (data.hasMore) {
       setTimeout(pollResults, POLL_INTERVAL);
@@ -89,8 +102,8 @@ function renderResults(results) {
 
     // Fill content
     skeleton.innerHTML = `
-      <a class="url_header" href="${result.url}">${result.url}</a>
-      <h3><a class="name" href="${result.url}">${result.title}</a></h3>
+      <a class="url_header" target="_blank" rel="noopener noreferrer" href="${result.url}">${result.url}</a>
+      <h3><a class="name" target="_blank" rel="noopener noreferrer" href="${result.url}">${result.title}</a></h3>
       <p class="description">${result.description}</p>
       <div class="engines">
         ${enginesHtml}
