@@ -32,7 +32,7 @@ addEventListener("DOMContentLoaded", (event) => {
   window.scrollTo(0, 0);
 
   let query = get_query();
-  document.querySelector(".search-bar").value = query;
+  document.querySelector(".search-input").value = query;
 
   startPolling(query);
 });

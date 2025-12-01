@@ -1,11 +1,23 @@
 {{#*inline "body"}}
 
 <div class="search-container">
-  <form action="/search" method="get">
-    <input type="hidden" name="t" value="general">
-    <input type="text" class="homepage-bar" placeholder="Search for..." name="q" autofocus>
-  </form>
+  <div class="homepage-wrapper">
+    <h1 class="homepage-title">Private Search</h1>
+    <br>
+
+    <form action="/search" method="get">
+      <input type="hidden" name="t" value="general">
+      <input type="text" class="search-input" placeholder="Search for..." name="q" autocomplete="off" autofocus>
+    </form>
+  </div>
 </div>
+
+<footer class="homepage-footer">
+  Built by <span>LegitCamper</span> — 
+  <a href="https://github.com/LegitCamper/private-search" target="_blank">
+    View on GitHub
+  </a>
+</footer>
 
 {{/inline}}
 {{> layout}}

@@ -3,39 +3,74 @@ html, body {
     margin: 0;
     background-color: #1e1e2e;
     color: white;
+
+    display: flex;
+    flex-direction: column;
+}
+
+.homepage-footer {
+    text-align: center;
+    margin-top: 2rem;
+    font-size: 0.9rem;
+    color: #a6adc8;
+}
+
+.homepage-footer a {
+    color: #89b4fa;
+    text-decoration: none;
+}
+
+.homepage-footer a:hover {
+    text-decoration: underline;
+}
+
+.homepage-footer span {
+    color: #cdd6f4;
+    font-weight: 600;
+}
+
+.homepage-title {
+    text-align: center;
+    font-size: 2.5rem;
+    margin-bottom: 1.2rem;
+    font-weight: 600;
 }
 
 .search-container {
     height: 100%;
     display: flex;
+    flex-direction: column;
     justify-content: center;
     align-items: center;
 }
 
-.homepage-bar {
-    max-width: 500px;
-    margin: 0 auto;
-    width: 95%;
+.search-input {
+    width: 100%;
+    max-width: 700px;
     padding: 12px 20px;
     font-size: 18px;
     border-radius: 8px;
     border: 1px solid #ccc;
     background-color: #505050;
+    color: #fff;
+    box-sizing: border-box;
+}
+
+.homepage-wrapper {
+    width: 95%;
+    max-width: 700px;
+    margin: 0 auto;
 }
 
 .top-bar {
     padding: 1rem 0 0.5rem 0;
     background-color: #1e1e2e;
     border-bottom: 1px solid #313244;
-    position: sticky;
+    position: fixed;
     top: 0;
-    z-index: 50;
-}
-
-.search-bar-container {
-    max-width: 700px;
-    width: 95%;
-    margin: 0 auto 0.5rem auto;
+    left: 0;
+    width: 100%;
+    z-index: 1000;
 }
 
 .search-categories {
