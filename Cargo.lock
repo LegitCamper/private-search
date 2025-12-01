@@ -1986,6 +1986,7 @@ dependencies = [
 [[package]]
 name = "private-search-engines"
 version = "0.1.0"
+source = "git+https://github.com/LegitCamper/private-search-engines#7c906e3e88b18d73dfa9adee8f53ccf81479b4a7"
 dependencies = [
  "chrono",
  "percent-encoding",

@@ -1,2 +1,2 @@
 [default]
-template_dir = "src/templates"
+template_dir = "templates"
