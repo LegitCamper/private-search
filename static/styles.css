@@ -70,7 +70,6 @@ html, body {
     top: 0;
     left: 0;
     width: 100%;
-    z-index: 1000;
 }
 
 .search-categories {
@@ -79,7 +78,6 @@ html, body {
     margin: 0.5rem auto 0 auto;
     display: flex;
     gap: 1.5rem;
-    padding-left: 4px;
 }
 
 .search-categories .category {
@@ -121,9 +119,10 @@ html, body {
 
 .results-container {
     display: flex;
+    padding-top: 125px;
+    display: flex;
     flex-direction: column;
     gap: 1rem;
-    padding-top: 1rem;
     color: #cdd6f4;
     font-family: 'Inter', sans-serif;
 }
