@@ -12,15 +12,16 @@ FROM alpine as runtime
 
 WORKDIR /app
 
+RUN adduser -D -u 1000 appuser \
+ && chown -R appuser:appuser /app
+
 COPY --from=builder /workspace/target/release/private-search .
 
 COPY ./static ./static
 COPY ./templates ./templates
 
-RUN adduser -D appuser
-USER appuser
-
 EXPOSE 8080
+USER appuser
 
 ENV ROCKET_ADDRESS=0.0.0.0
 ENV ROCKET_PORT=8080
