@@ -12,7 +12,22 @@ function get_query() {
   return params.get("q") || "";
 }
 
+// Set active tab on page load
+function setActiveTab() {
+  const params = new URLSearchParams(window.location.search);
+  const tab = params.get("t") || "general";
+
+  document.querySelectorAll(".search-categories .category").forEach(el => {
+    if (el.dataset.tab === tab) {
+      el.classList.add("active");
+    } else {
+      el.classList.remove("active");
+    }
+  });
+}
+
 addEventListener("DOMContentLoaded", (event) => {
+  setActiveTab()
   createSkeletons(numPages, 0)
   window.scrollTo(0, 0);
 

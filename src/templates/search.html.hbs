@@ -1,10 +1,25 @@
 {{#*inline "body"}}
 
-<div class="search-bar-container">
-  <form action="/search" method="get">
-    <input type="text" class="search-bar" placeholder="Search for..." name="q">
-  </form>
-</div>
+<header class="top-bar">
+  <div class="search-bar-container">
+    <form action="/search" method="get">
+      <input type="hidden" name="t" value="general">
+      <input type="text" class="search-bar" placeholder="Search for..." name="q">
+    </form>
+  </div>
+
+  <nav class="search-categories">
+    <a href="#" class="category" data-tab="general"
+      onclick="window.location.href='/search?q=' + encodeURIComponent(get_query()) + '&t=general'; return false;">
+      General
+    </a>
+
+    <a href="#" class="category" data-tab="images"
+      onclick="window.location.href='/search?q=' + encodeURIComponent(get_query()) + '&t=images'; return false;">
+      Images
+    </a>
+  </nav>
+</header>
 
 <div class="results-container"></div>
 

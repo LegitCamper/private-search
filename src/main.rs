@@ -1,16 +1,13 @@
-use std::{ops::DerefMut, sync::Arc};
-
 use rocket::{
-    Request, Response, State,
+    Request, Response,
     fairing::{Fairing, Info, Kind},
     fs::FileServer,
-    futures::lock::Mutex,
     response::Redirect,
-    serde::json::Json,
+    serde::{Serialize, json::Json},
 };
 use rocket_dyn_templates::{Template, context};
 
-use private_search_engines::{Engines, FetchError, SearchResult, fetch_or_cache_query, search_all};
+use private_search_engines::{Engines, FetchError, SearchResult, search_all};
 
 #[macro_use]
 extern crate rocket;
@@ -69,9 +66,16 @@ fn empty_search() -> Redirect {
     Redirect::to("/")
 }
 
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+pub struct TabFlags {
+    general: bool,
+    images: bool,
+}
+
 #[allow(unused_variables)]
-#[get("/search?<q>")]
-fn search(q: &str) -> Template {
+#[get("/search?<t>&<q>")]
+fn search(t: Option<String>, q: &str) -> Template {
     Template::render(
         "search",
         context! {
