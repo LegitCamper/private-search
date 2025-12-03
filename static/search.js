@@ -60,9 +60,11 @@ function unwrapResults(obj) {
 
 async function pollResults(query) {
   if (!polling || query === undefined || query === null) return;
+  const params = new URLSearchParams(window.location.search);
+  const tab = params.get("t") || "general";
 
   try {
-    const res = await fetch(`/query?query=${query}&start=${lastFetched}&count=${numPages}`);
+    const res = await fetch(`/query?tab=${tab}&query=${query}&start=${lastFetched}&count=${numPages}`);
     if (!res.ok) throw new Error("Failed to fetch results");
 
     const data = await res.json();

@@ -444,6 +444,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dyn-clone"
+version = "1.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
 name = "ego-tree"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1986,9 +1992,10 @@ dependencies = [
 [[package]]
 name = "private-search-engines"
 version = "0.1.0"
-source = "git+https://github.com/LegitCamper/private-search-engines#7c906e3e88b18d73dfa9adee8f53ccf81479b4a7"
 dependencies = [
+ "async-trait",
  "chrono",
+ "dyn-clone",
  "percent-encoding",
  "rand 0.9.2",
  "regex",
@@ -1996,7 +2003,6 @@ dependencies = [
  "scraper",
  "serde",
  "sqlx",
- "strum",
  "tokio",
 ]
 

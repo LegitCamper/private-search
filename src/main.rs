@@ -7,7 +7,11 @@ use rocket::{
 };
 use rocket_dyn_templates::{Template, context};
 
-use private_search_engines::{Engines, FetchError, SearchResult, search_all};
+use private_search_engines::{
+    FetchError, ImageResult, SearchResult,
+    engines::{Brave, DuckDuckGo},
+    search_engine_images, search_engine_results,
+};
 
 #[macro_use]
 extern crate rocket;
@@ -84,27 +88,34 @@ fn search(t: Option<String>, q: &str) -> Template {
     )
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(crate = "rocket::serde")]
 pub enum QueryResults {
     General(Vec<SearchResult>),
-    // Images(Vec<ImageResult>),
+    Images(Vec<ImageResult>),
 }
 
-#[get("/query?<query>&<start>&<count>")]
-async fn query(query: &str, start: usize, count: usize) -> Result<Json<QueryResults>, String> {
+#[get("/query?<tab>&<query>&<start>&<count>")]
+async fn query(
+    tab: &str,
+    query: &str,
+    start: usize,
+    count: usize,
+) -> Result<Json<QueryResults>, String> {
     // Validate count
     if count > 25 {
         return Err("maximum allowed count is 25".into());
     }
 
-    println!("query: {}, start: {}, count: {}", query, start, count);
-
-    let results = search_all(
-        String::from(query),
-        vec![Engines::Brave, Engines::DuckDuckGo],
-    )
-    .await
+    let results = match tab {
+        "General" | "general" => search_engine_results(query.to_string(), vec![Brave])
+            .await
+            .map(QueryResults::General),
+        "Images" | "images" => search_engine_images(query.to_string(), vec![Brave])
+            .await
+            .map(QueryResults::Images),
+        _ => return Err("Unknown Tab query requested".into()),
+    }
     .map_err(|e| {
         match e {
             FetchError::Sqlx(error) => {
@@ -125,5 +136,5 @@ async fn query(query: &str, start: usize, count: usize) -> Result<Json<QueryResu
 
     println!("res: {:?}", results);
 
-    Ok(Json(QueryResults::General(results)))
+    Ok(Json(results))
 }
