@@ -1,9 +1,9 @@
 {{#*inline "body"}}
 
 <header class="top-bar">
-  <div class="search-bar-container">
+  <div class="search-bar-container" onsubmit="return onSearchSubmit()">
     <form action="/search" method="get">
-      <input type="hidden" name="t" value="general">
+      <input id="search-type" type="hidden" name="t" value="general">
       <input type="text" class="search-input" placeholder="Search for..." name="q" autocomplete="off">
     </form>
   </div>

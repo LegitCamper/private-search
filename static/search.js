@@ -1,5 +1,6 @@
 const POLL_INTERVAL = 500; 
-const numPages = 10;
+const numSearchSkels = 10;
+const numImageSkels = 50;
 
 let lastFetched = 0; 
 let polling = false;
@@ -29,9 +30,9 @@ function setActiveTab() {
 addEventListener("DOMContentLoaded", (event) => {
   setActiveTab()
   if (currentTab === "images") {
-      createImageSkeletons(numPages, skeletons);
+      createImageSkeletons(numImageSkels, skeletons);
   } else {
-      createSearchSkeletons(numPages, skeletons);
+      createSearchSkeletons(numSearchSkels, skeletons);
   }
   window.scrollTo(0, 0);
 
@@ -66,7 +67,7 @@ async function pollResults(query) {
   const params = new URLSearchParams(window.location.search);
 
   try {
-    const res = await fetch(`/query?tab=${currentTab}&query=${query}&start=${lastFetched}&count=${numPages}`);
+    const res = await fetch(`/query?tab=${currentTab}&query=${query}&start=${lastFetched}&count=${numSearchSkels}`);
     if (!res.ok) throw new Error("Failed to fetch results");
 
     const data = await res.json();
@@ -221,9 +222,9 @@ window.addEventListener('scroll', () => {
     batchLoading = true; // mark that we are loading
 
     if (currentTab === "images") {
-        createImageSkeletons(numPages, skeletons);
+        createImageSkeletons(numImageSkels, skeletons);
     } else {
-        createSearchSkeletons(numPages, skeletons);
+        createSearchSkeletons(numSearchSkels, skeletons);
     }
 
     if (!polling) {
@@ -236,3 +237,7 @@ window.addEventListener('scroll', () => {
   }
 });
 
+function onSearchSubmit() {
+  document.getElementById("search-type").value = currentTab;
+  return true;
+}
