@@ -8,9 +8,8 @@ use rocket::{
 use rocket_dyn_templates::{Template, context};
 
 use private_search_engines::{
-    FetchError, ImageResult, SearchResult,
-    engines::{Brave, DuckDuckGo},
-    search_engine_images, search_engine_results,
+    FetchError, ImageEngines, ImageResult, SearchEngines, SearchResult, search_engine_images,
+    search_engine_results,
 };
 
 #[macro_use]
@@ -108,10 +107,13 @@ async fn query(
     }
 
     let results = match tab {
-        "General" | "general" => search_engine_results(query.to_string(), vec![Brave])
-            .await
-            .map(QueryResults::General),
-        "Images" | "images" => search_engine_images(query.to_string(), vec![Brave])
+        "General" | "general" => search_engine_results(
+            query.to_string(),
+            vec![SearchEngines::Brave, SearchEngines::DuckDuckGo],
+        )
+        .await
+        .map(QueryResults::General),
+        "Images" | "images" => search_engine_images(query.to_string(), vec![ImageEngines::Brave])
             .await
             .map(QueryResults::Images),
         _ => return Err("Unknown Tab query requested".into()),

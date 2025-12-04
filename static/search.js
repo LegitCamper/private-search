@@ -1,4 +1,3 @@
-const RESULTS_CONTAINER = document.querySelector(".results-container");
 const POLL_INTERVAL = 500; 
 const numPages = 10;
 
@@ -6,6 +5,7 @@ let lastFetched = 0;
 let polling = false;
 let skeletons = 0;        // total skeletons created so far
 let batchLoading = false; // prevents multiple skeleton triggers
+let currentTab = "general";
 
 function get_query() {
   let params = new URLSearchParams(location.search);
@@ -15,10 +15,10 @@ function get_query() {
 // Set active tab on page load
 function setActiveTab() {
   const params = new URLSearchParams(window.location.search);
-  const tab = params.get("t") || "general";
+  currentTab = params.get("t") || "general";
 
   document.querySelectorAll(".search-categories .category").forEach(el => {
-    if (el.dataset.tab === tab) {
+    if (el.dataset.tab === currentTab) {
       el.classList.add("active");
     } else {
       el.classList.remove("active");
@@ -28,7 +28,11 @@ function setActiveTab() {
 
 addEventListener("DOMContentLoaded", (event) => {
   setActiveTab()
-  createSkeletons(numPages, 0)
+  if (currentTab === "images") {
+      createImageSkeletons(numPages, skeletons);
+  } else {
+      createSearchSkeletons(numPages, skeletons);
+  }
   window.scrollTo(0, 0);
 
   let query = get_query();
@@ -52,7 +56,6 @@ function unwrapResults(obj) {
 
   if (obj.General) return obj.General;
   if (obj.Images) return obj.Images;
-  if (obj.Cs) return obj.Cs;
 
   console.warn("Unknown response variant:", obj);
   return [];
@@ -61,16 +64,19 @@ function unwrapResults(obj) {
 async function pollResults(query) {
   if (!polling || query === undefined || query === null) return;
   const params = new URLSearchParams(window.location.search);
-  const tab = params.get("t") || "general";
 
   try {
-    const res = await fetch(`/query?tab=${tab}&query=${query}&start=${lastFetched}&count=${numPages}`);
+    const res = await fetch(`/query?tab=${currentTab}&query=${query}&start=${lastFetched}&count=${numPages}`);
     if (!res.ok) throw new Error("Failed to fetch results");
 
     const data = await res.json();
     const results = unwrapResults(data);
 
-    renderResults(results);   
+    if (currentTab === "images") {
+        renderImageResults(results);
+    } else {
+        renderSearchResults(results);
+    }
     
     if (data.hasMore) {
       setTimeout(pollResults, POLL_INTERVAL);
@@ -84,18 +90,19 @@ async function pollResults(query) {
   }
 }
 
-function renderResults(results) {
+function renderSearchResults(results) {
+  let container = document.querySelector(".results-container");
   results.forEach((result, idx) => {
     // Compute which skeleton to fill
     const skeletonId = lastFetched + idx;
-    let skeleton = RESULTS_CONTAINER.querySelector(`.result-skeleton[data-result-id="${skeletonId}"]`);
+    let skeleton = container.querySelector(`.result-skeleton[data-result-id="${skeletonId}"]`);
 
     if (!skeleton) {
       // fallback: create one if it doesn't exist
       skeleton = document.createElement("article");
       skeleton.className = "result-skeleton";
       skeleton.dataset.resultId = skeletonId;
-      RESULTS_CONTAINER.appendChild(skeleton);
+      container.appendChild(skeleton);
     }
 
     const enginesHtml = result.engines
@@ -118,7 +125,41 @@ function renderResults(results) {
   lastFetched += results.length;
 }
 
-function createSkeletons(count, start) {
+function renderImageResults(results) {
+  let container = document.querySelector(".image-gallery");
+  results.forEach((result, idx) => {
+    // Compute which skeleton to fill
+    const skeletonId = lastFetched + idx;
+    let skeleton = container.querySelector(`.result-skeleton[data-result-id="${skeletonId}"]`);
+
+    if (!skeleton) {
+      // fallback: create one if it doesn't exist
+      skeleton = document.createElement("article");
+      skeleton.className = "result-skeleton";
+      skeleton.dataset.resultId = skeletonId;
+      container.appendChild(skeleton);
+    }  
+
+    skeleton.innerHTML = `
+      <a href="${result.url}" target="_blank" rel="noopener">
+        <img src="${result.url}" class="image-thumb" alt="">
+      </a>
+
+      <figcaption>
+        <div class="image-title">${result.title || ""}</div>
+        <div class="engines">
+          ${result.engines.map(e => `<span class="engine-tag">${e}</span>`).join(" ")}
+          ${result.cached ? '<span class="engine-tag cached">Cached ✓</span>' : ''}
+        </div>
+      </figcaption>
+    `;
+
+    skeleton.className = "image-result";
+  });
+  lastFetched += results.length;
+}
+
+function createSearchSkeletons(count, start) {
   const container = document.querySelector(".results-container");
   for (let i = start; i < count; i++) {
     const sk = document.createElement("article");
@@ -142,6 +183,27 @@ function createSkeletons(count, start) {
 
 }
 
+function createImageSkeletons(count, start) {
+  const container = document.querySelector(".image-gallery");
+  for (let i = start; i < count; i++) {
+    const sk = document.createElement("article");
+    sk.className = "result-skeleton";
+    sk.dataset.resultId = i;
+
+    sk.innerHTML = `
+      <div class="image-thumb skeleton"></div>
+      <figcaption>
+        <div class="skeleton skeleton-url"></div>
+        <div class="skeleton skeleton-engine"></div>
+      </figcaption>
+    `;
+
+    container.appendChild(sk);
+  }
+
+  skeletons += count;
+}
+
 window.addEventListener('scroll', () => {
   const scrollTop = window.scrollY || window.pageYOffset;
   const windowHeight = window.innerHeight;
@@ -154,7 +216,12 @@ window.addEventListener('scroll', () => {
     if (batchLoading) return; // already loading a batch
 
     batchLoading = true; // mark that we are loading
-    createSkeletons(numPages, skeletons)
+
+    if (currentTab === "images") {
+        createImageSkeletons(numPages, skeletons);
+    } else {
+        createSearchSkeletons(numPages, skeletons);
+    }
 
     if (!polling) {
       startPolling(get_query()).finally(() => {
