@@ -135,7 +135,7 @@ function renderImageResults(results) {
     if (!skeleton) {
       // fallback: create one if it doesn't exist
       skeleton = document.createElement("article");
-      skeleton.className = "result-skeleton";
+      skeleton.className = "image-result";
       skeleton.dataset.resultId = skeletonId;
       container.appendChild(skeleton);
     }  
@@ -165,6 +165,7 @@ function createSearchSkeletons(count, start) {
     const sk = document.createElement("article");
     sk.className = "result-skeleton";
     sk.dataset.resultId = i;
+
     sk.innerHTML = `
       <div class="url_header skeleton skeleton-url"></div>
       <h3 class="name skeleton skeleton-title"></h3>
@@ -177,9 +178,11 @@ function createSearchSkeletons(count, start) {
         <span class="skeleton skeleton-engine"></span>
       </div>
     `;
+
     container.appendChild(sk);
   }
-    skeletons += count;
+
+  skeletons += count;
 
 }
 
