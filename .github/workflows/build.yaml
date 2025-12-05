@@ -17,8 +17,6 @@ jobs:
       - name: Lowercase variables
         id: vars
         run: |
-          echo "owner_lower=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-          echo "repo_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
 
       - name: Login to GitHub Container Registry
@@ -33,5 +31,5 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ steps.vars.outputs.owner_lower }}/${{ steps.vars.outputs.repo_lower }}:${{ github.sha }}
+          tags: ghcr.io/legitcamper/private-search:${{ github.sha }}
 
