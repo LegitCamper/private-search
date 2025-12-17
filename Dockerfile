@@ -13,7 +13,8 @@ FROM alpine as runtime
 WORKDIR /app
 
 RUN adduser -D -u 1000 appuser \
- && chown -R appuser:appuser /app
+ && mkdir /cache \
+ && chown -R appuser:appuser /cache /app
 
 COPY --from=builder /workspace/target/release/private-search .
 
@@ -25,6 +26,6 @@ USER appuser
 
 ENV ROCKET_ADDRESS=0.0.0.0
 ENV ROCKET_PORT=8080
-ENV SQLITE_DB_ENV=/cache/cache.db
+ENV CACHE_DB_PATH=/cache/cache.db
 
 CMD [ "./private-search" ]
