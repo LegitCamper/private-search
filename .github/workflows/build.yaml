@@ -31,5 +31,6 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/legitcamper/private-search:${{ github.sha }}
-
+          tags: |
+            ghcr.io/legitcamper/private-search:${{ github.sha }}
+            ghcr.io/legitcamper/private-search:latest
