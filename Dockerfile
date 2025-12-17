@@ -12,20 +12,23 @@ FROM alpine as runtime
 
 WORKDIR /app
 
-RUN adduser -D -u 1000 appuser \
- && mkdir /cache \
- && chown -R appuser:appuser /cache /app
+RUN adduser -D -u 1000 appuser
 
 COPY --from=builder /workspace/target/release/private-search .
 
 COPY ./static ./static
 COPY ./templates ./templates
 
-EXPOSE 8080
+COPY entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["entrypoint.sh"]
+
 USER appuser
+
+EXPOSE 8080
 
 ENV ROCKET_ADDRESS=0.0.0.0
 ENV ROCKET_PORT=8080
-ENV CACHE_DB_PATH=/cache/cache.db
 
-CMD [ "./private-search" ]
+CMD ["./private-search"]
