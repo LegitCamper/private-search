@@ -153,6 +153,11 @@ html, body {
     color: #b4befe;
 }
 
+.url_header:visited,
+.name:visited {
+    color: #7f849c;
+}
+
 .result .url_header:hover {
     text-decoration: underline;
 }
