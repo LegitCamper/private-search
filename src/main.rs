@@ -136,6 +136,7 @@ async fn query(
         "Query Error".to_string()
     })?;
 
+    #[cfg(debug_assertions)]
     println!("res: {:?}", results);
 
     Ok(Json(results))
