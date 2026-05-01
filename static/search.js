@@ -64,30 +64,52 @@ function unwrapResults(obj) {
 
 async function pollResults(query) {
   if (!polling || query === undefined || query === null) return;
-  const params = new URLSearchParams(window.location.search);
 
   try {
-    const res = await fetch(`/query?tab=${currentTab}&query=${query}&start=${lastFetched}&count=${numSearchSkels}`);
-    if (!res.ok) throw new Error("Failed to fetch results");
+    const res = await fetch(
+      `/query?tab=${currentTab}&query=${encodeURIComponent(query)}&start=${lastFetched}&count=${numSearchSkels}`
+    );
 
-    const data = await res.json();
+    const text = await res.text();
+
+    if (!res.ok) {
+      throw new Error(`Failed to fetch results: ${res.status}`);
+    }
+
+    if (
+      text.trim() === "Query Error" ||
+      text.trim().includes("Query Error")
+    ) {
+      console.warn("Server returned Query Error, retrying...");
+      setTimeout(() => pollResults(query), 1000);
+      return;
+    }
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      console.error("Failed to parse response as JSON:", text);
+      setTimeout(() => pollResults(query), 1000);
+      return;
+    }
+
     const results = unwrapResults(data);
 
     if (currentTab === "images") {
-        renderImageResults(results);
+      renderImageResults(results);
     } else {
-        renderSearchResults(results);
+      renderSearchResults(results);
     }
-    
+
     if (data.hasMore) {
-      setTimeout(pollResults, POLL_INTERVAL);
+      setTimeout(() => pollResults(query), POLL_INTERVAL);
     } else {
       stopPolling();
     }
   } catch (err) {
     console.error("Error polling results:", err);
-    
-    setTimeout(pollResults, 1000);
+    setTimeout(() => pollResults(query), 1000);
   }
 }
 
