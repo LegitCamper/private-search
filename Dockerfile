@@ -10,10 +10,13 @@ RUN apt-get update && \
     libssl-dev \
     libsqlite3-dev \
     lld \
+    curl \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN cargo install cargo-sonic --locked
+RUN curl -L --proto '=https' --tlsv1.2 -sSf \
+    https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash; \
+    cargo binstall cargo-sonic
 
 RUN --mount=type=cache,target=/build/target \
     --mount=type=cache,target=/usr/local/cargo/registry \
@@ -29,23 +32,14 @@ RUN --mount=type=cache,target=/build/target \
     objcopy --compress-debug-sections target/sonic/x86_64-unknown-linux-gnu/release/private-search ./main
 
 
-FROM alpine AS runtime
+FROM docker.io/rust:1-slim-bookworm AS runtime
 
 WORKDIR /app
-
-RUN adduser -D -u 1000 appuser
 
 COPY --from=builder /workspace/main ./
 
 COPY ./static ./static
 COPY ./templates ./templates
-
-COPY entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-ENTRYPOINT ["entrypoint.sh"]
-
-USER appuser
 
 EXPOSE 8080
 

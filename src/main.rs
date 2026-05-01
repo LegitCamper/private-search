@@ -8,8 +8,8 @@ use rocket::{
 use rocket_dyn_templates::{Template, context};
 
 use private_search_engines::{
-    FetchError, ImageEngines, ImageResult, SearchEngines, SearchResult, search_engine_images,
-    search_engine_results,
+    FetchError, ImageEngines, ImageResult, SearchEngines, SearchResult, init_db,
+    search_engine_images, search_engine_results,
 };
 
 #[macro_use]
@@ -17,6 +17,7 @@ extern crate rocket;
 
 #[rocket::main]
 async fn main() -> Result<(), rocket::Error> {
+    _ = init_db();
     let _rocket = rocket::build()
         .attach(Template::fairing())
         .attach(CacheFairing)

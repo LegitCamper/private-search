@@ -1987,7 +1987,7 @@ dependencies = [
 [[package]]
 name = "private-search-engines"
 version = "0.1.0"
-source = "git+https://github.com/LegitCamper/private-search-engines#9968a0d39a4fa62302e791f5d7b0623564c2465d"
+source = "git+https://github.com/LegitCamper/private-search-engines#f6c3cc539778d53bf9d96e2f383d5016fe6115b3"
 dependencies = [
  "async-trait",
  "chrono",
