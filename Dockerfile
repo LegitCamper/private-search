@@ -1,4 +1,4 @@
-FROM rust:1-bookworm AS builder
+FROM docker.io/rust:1-slim-bookworm AS builder
 
 WORKDIR /workspace
 
@@ -15,23 +15,27 @@ RUN apt-get update && \
 
 RUN cargo install cargo-sonic --locked
 
-RUN cargo sonic \
-    --target-cpus=x86-64-v3,skylake \
-    --compress=zstd \
-    --compression-level=10 \
-    -p 2 \
-    --loader=bundle \
-    build --release
+RUN --mount=type=cache,target=/build/target \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    set -eux; \
+    cargo sonic \
+        --target-cpus=x86-64-v3,skylake \
+        --compress=zstd \
+        --compression-level=10 \
+        --parallelism=2 \
+        --loader=embedded \
+        build --release; \
+    objcopy --compress-debug-sections target/sonic/x86_64-unknown-linux-gnu/release/private-search ./main
 
-FROM alpine as runtime
+
+FROM alpine AS runtime
 
 WORKDIR /app
 
 RUN adduser -D -u 1000 appuser
 
-# COPY --from=builder /workspace/target/release/private-search .
-COPY --from=builder /workspace/target/sonic/x86_64-unknown-linux-gnu/release/private-search ./
-COPY --from=builder /workspace/target/sonic/x86_64-unknown-linux-gnu/release/private-search.bundle ./private-search.bundle
+COPY --from=builder /workspace/main ./
 
 COPY ./static ./static
 COPY ./templates ./templates
@@ -48,4 +52,4 @@ EXPOSE 8080
 ENV ROCKET_ADDRESS=0.0.0.0
 ENV ROCKET_PORT=8080
 
-CMD ["./private-search"]
+CMD ["./main"]
