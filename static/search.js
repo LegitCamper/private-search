@@ -52,14 +52,54 @@ function stopPolling() {
   batchLoading = false;
 }
 
-function unwrapResults(obj) {
-  if (!obj || typeof obj !== "object") return [];
+function unwrapPayload(obj) {
+  const empty = { results: [], engines: [] };
+  if (!obj || typeof obj !== "object") return empty;
 
-  if (obj.General) return obj.General;
-  if (obj.Images) return obj.Images;
+  const payload = obj.General || obj.Images;
+  if (!payload) {
+    console.warn("Unknown response variant:", obj);
+    return empty;
+  }
 
-  console.warn("Unknown response variant:", obj);
-  return [];
+  return { results: payload.results || [], engines: payload.engines || [] };
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderEngineStatus(engines) {
+  const container = document.getElementById("engine-status");
+  if (!container) return;
+
+  if (!engines || engines.length === 0) {
+    container.innerHTML = "";
+    return;
+  }
+
+  container.innerHTML = engines
+    .map(report => {
+      const status = (report.status && report.status.status) || "ok";
+      const detail = report.status && report.status.detail;
+      const label =
+        status === "ok" ? "responded"
+        : status === "timed_out" ? "timed out"
+        : "failed";
+
+      return `
+        <div class="engine-status-row" title="${detail ? escapeHtml(detail) : ""}">
+          <span class="engine-status-dot ${escapeHtml(status)}"></span>
+          <span class="engine-status-name">${escapeHtml(report.engine)}</span>
+          <span class="engine-status-detail">${label}</span>
+        </div>
+      `;
+    })
+    .join("");
 }
 
 async function pollResults(query) {
@@ -94,7 +134,9 @@ async function pollResults(query) {
       return;
     }
 
-    const results = unwrapResults(data);
+    const { results, engines } = unwrapPayload(data);
+
+    renderEngineStatus(engines);
 
     if (currentTab === "images") {
       renderImageResults(results);

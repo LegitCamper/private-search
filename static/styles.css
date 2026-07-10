@@ -244,3 +244,51 @@ figcaption {
 .skeleton-description { height: 10px; width: 100%; margin-bottom: 0.25rem; }
 .skeleton-engine { height: 10px; width: 20%; margin-right: 0.25rem; }
 
+.engine-status {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    background-color: #313244;
+    border-radius: 10px;
+    padding: 0.6rem 0.8rem;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+    font-size: 0.8rem;
+    max-width: 220px;
+    z-index: 10;
+}
+
+.engine-status:empty {
+    display: none;
+}
+
+.engine-status-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: #cdd6f4;
+}
+
+.engine-status-dot {
+    width: 8px;
+    height: 8px;
+    min-width: 8px;
+    border-radius: 50%;
+}
+
+.engine-status-dot.ok { background-color: #a6e3a1; }
+.engine-status-dot.timed_out { background-color: #f9e2af; }
+.engine-status-dot.failed { background-color: #f38ba8; }
+
+.engine-status-name {
+    font-weight: 600;
+}
+
+.engine-status-detail {
+    color: #a6adc8;
+    font-size: 0.75rem;
+    margin-left: auto;
+}
+
