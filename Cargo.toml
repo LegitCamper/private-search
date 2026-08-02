@@ -1,12 +1,3 @@
-[package]
-name = "private-search"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-rocket = { version = "0.5.1", features = ["json"] }
-rocket_dyn_templates = { version = "0.2.0", features = ["handlebars"] }
-skyscraper = "0.6.4"
-lazy_static = "1.5.0"
-private-search-engines = { git = "https://github.com/LegitCamper/private-search-engines" }
-# private-search-engines = { path = "../private-search-engines" }
+[workspace]
+members = ["engines", "private-search"]
+resolver = "2"

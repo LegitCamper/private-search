@@ -38,12 +38,14 @@ WORKDIR /app
 
 COPY --from=builder /workspace/main ./
 
-COPY ./static ./static
-COPY ./templates ./templates
+COPY ./private-search/static ./static
+COPY ./private-search/templates ./templates
 
 EXPOSE 8080
 
 ENV ROCKET_ADDRESS=0.0.0.0
 ENV ROCKET_PORT=8080
+ENV STATIC_DIR=/app/static
+ENV TEMPLATE_DIR=/app/templates
 
 CMD ["./main"]

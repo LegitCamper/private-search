@@ -15,13 +15,32 @@ use private_search_engines::{
 #[macro_use]
 extern crate rocket;
 
+/// Resolves an asset dir from `env_var` if set, otherwise falls back to a path
+/// relative to this crate (baked in at compile time via `CARGO_MANIFEST_DIR`).
+/// The fallback makes `cargo run` work from anywhere (repo root or this crate's
+/// dir); the env var lets deployments (e.g. Docker) point at wherever the
+/// assets actually land at runtime, since the compile-time path won't exist
+/// outside the machine/container that built the binary.
+fn resolve_dir(env_var: &str, manifest_relative_default: &str) -> String {
+    std::env::var(env_var).unwrap_or_else(|_| manifest_relative_default.to_string())
+}
+
 #[rocket::main]
 async fn main() -> Result<(), rocket::Error> {
-    _ = init_db();
-    let _rocket = rocket::build()
+    init_db().await;
+
+    let static_dir = resolve_dir("STATIC_DIR", concat!(env!("CARGO_MANIFEST_DIR"), "/static"));
+    let template_dir = resolve_dir(
+        "TEMPLATE_DIR",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/templates"),
+    );
+
+    let figment = rocket::Config::figment().merge(("template_dir", template_dir));
+
+    let _rocket = rocket::custom(figment)
         .attach(Template::fairing())
         .attach(CacheFairing)
-        .mount("/static", FileServer::from("static"))
+        .mount("/static", FileServer::from(static_dir))
         .mount("/", routes![index, empty_search, search, query])
         .ignite()
         .await?
