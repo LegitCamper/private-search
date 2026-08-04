@@ -1,0 +1,90 @@
+// Pure, DOM-free logic pulled out of search.js so it can be unit tested with
+// plain `node:test` — no browser/jsdom needed.
+
+export function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// Result urls come from scraped, untrusted third-party HTML. Only allow
+// http(s) links (blocks `javascript:`/`data:` etc.) and escape the rest so
+// it's safe to drop into an href/src attribute. `base` is required (rather
+// than defaulting to the browser's `location`) so this stays callable from
+// Node tests with no DOM.
+export function safeUrl(url, base) {
+  try {
+    const parsed = new URL(String(url), base);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return escapeHtml(parsed.href);
+    }
+  } catch (e) {
+    // not a valid URL — fall through to blocking it
+  }
+  return "#";
+}
+
+export function unwrapPayload(obj) {
+  const empty = { results: [], engines: [], hasMore: false };
+  if (!obj || typeof obj !== "object") return empty;
+
+  const payload = obj.General || obj.Images;
+  if (!payload) {
+    console.warn("Unknown response variant:", obj);
+    return empty;
+  }
+
+  return {
+    results: payload.results || [],
+    engines: payload.engines || [],
+    hasMore: !!payload.hasMore,
+  };
+}
+
+// `search` is a `location.search`-shaped string (e.g. "?q=rust&t=general"),
+// passed explicitly rather than read from `location` so this is callable
+// from Node tests with no DOM.
+export function getQueryParam(search, name) {
+  return new URLSearchParams(search).get(name) || "";
+}
+
+// A small FIFO of not-yet-filled placeholder elements. Replaces matching
+// results to skeletons by a computed numeric id (which could drift out of
+// sync whenever a poll returns a different number of results than were
+// pre-allocated skeletons for, e.g. two engines each contributing up to
+// `count` distinct results merges into more than `count` total) — instead,
+// whichever skeleton is next in line gets filled next, full stop.
+export class SkeletonQueue {
+  constructor() {
+    this._items = [];
+  }
+
+  push(item) {
+    this._items.push(item);
+  }
+
+  get length() {
+    return this._items.length;
+  }
+
+  // Returns the next unfilled item, or the result of `createFn()` if the
+  // queue is currently empty (never returns the same item twice).
+  next(createFn) {
+    if (this._items.length > 0) {
+      return this._items.shift();
+    }
+    return createFn();
+  }
+
+  // Empties the queue and returns whatever was left in it — used once
+  // polling ends (no more results coming) to find any pre-allocated
+  // skeletons that will now never be filled, so the caller can remove them
+  // instead of leaving permanent loading placeholders on the page.
+  drain() {
+    const leftover = this._items;
+    this._items = [];
+    return leftover;
+  }
+}

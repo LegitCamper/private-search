@@ -1,9 +1,6 @@
 use crate::{
-    cache::{ImagesRow, ResultRow},
-    engines::{
-        EngineError, EngineInfo, ImageEngine, SearchEngine, new_rand_client, parse_images,
-        parse_search,
-    },
+    EngineError, EngineInfo, ImageEngine, RawImage, RawResult, SearchEngine, new_rand_client,
+    parse_images, parse_search,
 };
 use async_trait::async_trait;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -54,7 +51,7 @@ impl SearchEngine for Brave {
         query: &str,
         start: usize,
         _count: usize,
-    ) -> Result<Vec<ResultRow>, EngineError> {
+    ) -> Result<Vec<RawResult>, EngineError> {
         let resp = new_rand_client()
             .get(build_search_url(query, start))
             .send()
@@ -72,7 +69,7 @@ impl SearchEngine for Brave {
     }
 }
 
-pub fn parse_search_response(html: &str) -> Result<Vec<ResultRow>, EngineError> {
+pub fn parse_search_response(html: &str) -> Result<Vec<RawResult>, EngineError> {
     Ok(parse_search(
         html,
         "#results > .snippet[data-pos]:not(.standalone)",
@@ -92,7 +89,7 @@ impl ImageEngine for Brave {
         query: &str,
         _start: usize,
         _count: usize,
-    ) -> Result<Vec<ImagesRow>, EngineError> {
+    ) -> Result<Vec<RawImage>, EngineError> {
         let resp = new_rand_client()
             .get(build_image_search_url(query))
             .send()
@@ -110,7 +107,7 @@ impl ImageEngine for Brave {
     }
 }
 
-pub fn parse_image_response(html: &str) -> Result<Vec<ImagesRow>, EngineError> {
+pub fn parse_image_response(html: &str) -> Result<Vec<RawImage>, EngineError> {
     Ok(parse_images(
         html,
         ".image-result",
@@ -152,6 +149,17 @@ mod test {
         assert_eq!(
             build_search_url("AT&T c++ #tag", 0),
             "https://search.brave.com/search?q=AT%26T%20c%2B%2B%20%23tag"
+        );
+    }
+
+    /// Non-ASCII queries must survive a full percent-encode round trip —
+    /// regression guard for "encoding support" (unicode search terms are a
+    /// normal, not edge-case, input for a search engine).
+    #[test]
+    fn build_search_url_encodes_non_ascii_query() {
+        assert_eq!(
+            build_search_url("café 日本語", 0),
+            "https://search.brave.com/search?q=caf%C3%A9%20%E6%97%A5%E6%9C%AC%E8%AA%9E"
         );
     }
 
@@ -240,7 +248,7 @@ mod test {
         assert_eq!(images[1].title, "Ferris the Crab");
     }
 
-    use crate::engines::fixtures::cached_html;
+    use crate::fixtures::cached_html;
 
     #[ignore]
     #[tokio::test]

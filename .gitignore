@@ -1,3 +1,8 @@
 /target
 cache.db
+cache.db-journal
+cache.db-wal
+cache.db-shm
+data/
 /main
+node_modules/

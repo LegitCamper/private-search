@@ -21,6 +21,8 @@
   </nav>
 </header>
 
+<div id="query-error-banner" class="query-error-banner" role="alert" hidden></div>
+
 <!-- NORMAL SEARCH RESULTS -->
 <div class="results-container"></div>
 
@@ -30,7 +32,7 @@
 <!-- ENGINE STATUS SIDEBAR -->
 <aside class="engine-status" id="engine-status" aria-live="polite"></aside>
 
-<script type="text/javascript" src="static/search.js"></script>
+<script type="module" src="static/search.js?v={{version}}"></script>
 
 {{/inline}}
 {{> layout}}

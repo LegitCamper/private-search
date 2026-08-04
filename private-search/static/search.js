@@ -1,16 +1,32 @@
-const POLL_INTERVAL = 500; 
+import {
+  escapeHtml,
+  safeUrl,
+  unwrapPayload,
+  getQueryParam,
+  SkeletonQueue,
+} from "./search-core.js";
+
+const POLL_INTERVAL = 500;
 const numSearchSkels = 10;
 const numImageSkels = 50;
 
-let lastFetched = 0; 
+const CONSECUTIVE_FAILURES_BEFORE_BANNER = 3;
+
+let lastFetched = 0;
 let polling = false;
-let skeletons = 0;        // total skeletons created so far
 let batchLoading = false; // prevents multiple skeleton triggers
 let currentTab = "general";
+let consecutiveFailures = 0;
+
+const searchSkeletons = new SkeletonQueue();
+const imageSkeletons = new SkeletonQueue();
 
 function get_query() {
-  let params = new URLSearchParams(location.search);
-  return params.get("q") || "";
+  return getQueryParam(location.search, "q");
+}
+
+function url(u) {
+  return safeUrl(u, location.href);
 }
 
 // Set active tab on page load
@@ -30,9 +46,9 @@ function setActiveTab() {
 addEventListener("DOMContentLoaded", (event) => {
   setActiveTab()
   if (currentTab === "images") {
-      createImageSkeletons(numImageSkels, skeletons);
+      createImageSkeletons(numImageSkels);
   } else {
-      createSearchSkeletons(numSearchSkels, skeletons);
+      createSearchSkeletons(numSearchSkels);
   }
   window.scrollTo(0, 0);
 
@@ -44,52 +60,12 @@ addEventListener("DOMContentLoaded", (event) => {
 
 async function startPolling(query) {
   polling = true;
-  pollResults(query);
+  await pollResults(query);
 }
 
 function stopPolling() {
   polling = false;
   batchLoading = false;
-}
-
-function unwrapPayload(obj) {
-  const empty = { results: [], engines: [], hasMore: false };
-  if (!obj || typeof obj !== "object") return empty;
-
-  const payload = obj.General || obj.Images;
-  if (!payload) {
-    console.warn("Unknown response variant:", obj);
-    return empty;
-  }
-
-  return {
-    results: payload.results || [],
-    engines: payload.engines || [],
-    hasMore: !!payload.hasMore,
-  };
-}
-
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-// Result urls come from scraped, untrusted third-party HTML. Only allow
-// http(s) links (blocks `javascript:`/`data:` etc.) and escape the rest so
-// it's safe to drop into an href/src attribute.
-function safeUrl(url) {
-  try {
-    const parsed = new URL(String(url), location.href);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      return escapeHtml(parsed.href);
-    }
-  } catch (e) {
-    // not a valid URL — fall through to blocking it
-  }
-  return "#";
 }
 
 function renderEngineStatus(engines) {
@@ -121,6 +97,43 @@ function renderEngineStatus(engines) {
     .join("");
 }
 
+// Extracts `{error: "..."}` from a non-OK JSON response, falling back to
+// the raw HTTP status when the body isn't the JSON error envelope the
+// server is supposed to send (see `main.rs`'s `ApiErrorBody`).
+async function describeError(res) {
+  try {
+    const body = await res.json();
+    if (body && typeof body.error === "string") return body.error;
+  } catch (e) {
+    // body wasn't JSON — fall through to the status-based message
+  }
+  return `HTTP ${res.status}`;
+}
+
+// Shows/hides a small persistent banner once a poll has failed several times
+// in a row — a single blip isn't worth alarming the user over (retries are
+// cheap; results are already heavily cached), but silently retrying forever
+// with zero feedback looks like the page is just broken.
+function setErrorBanner(message) {
+  const banner = document.getElementById("query-error-banner");
+  if (!banner) return;
+  banner.hidden = !message;
+  banner.textContent = message || "";
+}
+
+function onPollFailure(message) {
+  consecutiveFailures += 1;
+  console.warn(`Query failed (${message}), retrying...`);
+  if (consecutiveFailures >= CONSECUTIVE_FAILURES_BEFORE_BANNER) {
+    setErrorBanner(`Search is having trouble responding (${message}) — still retrying…`);
+  }
+}
+
+function onPollSuccess() {
+  consecutiveFailures = 0;
+  setErrorBanner(null);
+}
+
 async function pollResults(query) {
   if (!polling || query === undefined || query === null) return;
 
@@ -129,29 +142,25 @@ async function pollResults(query) {
       `/query?tab=${currentTab}&query=${encodeURIComponent(query)}&start=${lastFetched}&count=${numSearchSkels}`
     );
 
-    const text = await res.text();
-
     if (!res.ok) {
-      throw new Error(`Failed to fetch results: ${res.status}`);
-    }
-
-    if (
-      text.trim() === "Query Error" ||
-      text.trim().includes("Query Error")
-    ) {
-      console.warn("Server returned Query Error, retrying...");
-      setTimeout(() => pollResults(query), 1000);
+      const message = await describeError(res);
+      onPollFailure(message);
+      // A 429 means we're rate limited — back off longer than the normal
+      // retry interval instead of hammering the server further.
+      setTimeout(() => pollResults(query), res.status === 429 ? 2000 : 1000);
       return;
     }
 
     let data;
     try {
-      data = JSON.parse(text);
+      data = await res.json();
     } catch (err) {
-      console.error("Failed to parse response as JSON:", text);
+      onPollFailure("bad response");
       setTimeout(() => pollResults(query), 1000);
       return;
     }
+
+    onPollSuccess();
 
     const { results, engines, hasMore } = unwrapPayload(data);
 
@@ -166,35 +175,92 @@ async function pollResults(query) {
     if (hasMore) {
       setTimeout(() => pollResults(query), POLL_INTERVAL);
     } else {
-      stopPolling();
+      finishSearch();
     }
   } catch (err) {
-    console.error("Error polling results:", err);
+    onPollFailure("network error");
     setTimeout(() => pollResults(query), 1000);
   }
 }
 
-function renderSearchResults(results) {
-  let container = document.querySelector(".results-container");
-  results.forEach((result, idx) => {
-    // Compute which skeleton to fill
-    const skeletonId = lastFetched + idx;
-    let skeleton = container.querySelector(`.result-skeleton[data-result-id="${skeletonId}"]`);
+// Called once a search has definitively run out of results (`hasMore` is
+// false). Any skeletons still sitting in the queue were over-allocated and
+// will never be filled — pull them off the page instead of leaving
+// permanent loading placeholders, and if nothing was ever rendered at all,
+// say so instead of just... showing nothing.
+function finishSearch() {
+  stopPolling();
 
-    if (!skeleton) {
-      // fallback: create one if it doesn't exist
-      skeleton = document.createElement("article");
-      skeleton.className = "result-skeleton";
-      skeleton.dataset.resultId = skeletonId;
-      container.appendChild(skeleton);
-    }
+  const queue = currentTab === "images" ? imageSkeletons : searchSkeletons;
+  queue.drain().forEach(sk => sk.remove());
+
+  if (lastFetched === 0) {
+    const container = document.querySelector(currentTab === "images" ? ".image-gallery" : ".results-container");
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = currentTab === "images" ? "No images found." : "No results found.";
+    container.appendChild(empty);
+  }
+}
+
+function makeSearchSkeleton() {
+  const sk = document.createElement("article");
+  sk.className = "result-skeleton";
+
+  sk.innerHTML = `
+    <div class="url_header skeleton skeleton-url"></div>
+    <h3 class="name skeleton skeleton-title"></h3>
+    <p class="description">
+      <span class="skeleton skeleton-description"></span>
+      <span class="skeleton skeleton-description"></span>
+      <span class="skeleton skeleton-description"></span>
+    </p>
+    <div class="engines">
+      <span class="skeleton skeleton-engine"></span>
+    </div>
+  `;
+
+  document.querySelector(".results-container").appendChild(sk);
+  return sk;
+}
+
+function makeImageSkeleton() {
+  const sk = document.createElement("article");
+  sk.className = "result-skeleton";
+
+  sk.innerHTML = `
+    <div class="image-thumb skeleton"></div>
+    <figcaption>
+      <div class="skeleton skeleton-url"></div>
+      <div class="skeleton skeleton-engine"></div>
+    </figcaption>
+  `;
+
+  document.querySelector(".image-gallery").appendChild(sk);
+  return sk;
+}
+
+function createSearchSkeletons(count) {
+  for (let i = 0; i < count; i++) {
+    searchSkeletons.push(makeSearchSkeleton());
+  }
+}
+
+function createImageSkeletons(count) {
+  for (let i = 0; i < count; i++) {
+    imageSkeletons.push(makeImageSkeleton());
+  }
+}
+
+function renderSearchResults(results) {
+  results.forEach((result) => {
+    const skeleton = searchSkeletons.next(makeSearchSkeleton);
 
     const enginesHtml = result.engines
       .map(e => `<span class="engine-tag">${escapeHtml(e)}</span>`)
       .join(" ");
-    const href = safeUrl(result.url);
+    const href = url(result.url);
 
-    // Fill content
     skeleton.innerHTML = `
       <a class="url_header" target="_blank" rel="noopener noreferrer" href="${href}">${escapeHtml(result.url)}</a>
       <h3><a class="name" target="_blank" rel="noopener noreferrer" href="${href}">${escapeHtml(result.title)}</a></h3>
@@ -211,25 +277,13 @@ function renderSearchResults(results) {
 }
 
 function renderImageResults(results) {
-  let container = document.querySelector(".image-gallery");
-  results.forEach((result, idx) => {
-    // Compute which skeleton to fill
-    const skeletonId = lastFetched + idx;
-    let skeleton = container.querySelector(`.result-skeleton[data-result-id="${skeletonId}"]`);
-
-    if (!skeleton) {
-      // fallback: create one if it doesn't exist
-      skeleton = document.createElement("article");
-      skeleton.className = "image-result";
-      skeleton.dataset.resultId = skeletonId;
-      container.appendChild(skeleton);
-    }  
-
-    const href = safeUrl(result.url);
+  results.forEach((result) => {
+    const skeleton = imageSkeletons.next(makeImageSkeleton);
+    const href = url(result.url);
 
     skeleton.innerHTML = `
       <a href="${href}" target="_blank" rel="noopener">
-        <img src="${href}" class="image-thumb" alt="">
+        <img src="${href}" class="image-thumb" alt="" loading="lazy" decoding="async">
       </a>
 
       <figcaption>
@@ -246,54 +300,6 @@ function renderImageResults(results) {
   lastFetched += results.length;
 }
 
-function createSearchSkeletons(count, start) {
-  const container = document.querySelector(".results-container");
-  for (let i = start; i < count; i++) {
-    const sk = document.createElement("article");
-    sk.className = "result-skeleton";
-    sk.dataset.resultId = i;
-
-    sk.innerHTML = `
-      <div class="url_header skeleton skeleton-url"></div>
-      <h3 class="name skeleton skeleton-title"></h3>
-      <p class="description">
-        <span class="skeleton skeleton-description"></span>
-        <span class="skeleton skeleton-description"></span>
-        <span class="skeleton skeleton-description"></span>
-      </p>
-      <div class="engines">
-        <span class="skeleton skeleton-engine"></span>
-      </div>
-    `;
-
-    container.appendChild(sk);
-  }
-
-  skeletons += count;
-
-}
-
-function createImageSkeletons(count, start) {
-  const container = document.querySelector(".image-gallery");
-  for (let i = start; i < count; i++) {
-    const sk = document.createElement("article");
-    sk.className = "result-skeleton";
-    sk.dataset.resultId = i;
-
-    sk.innerHTML = `
-      <div class="image-thumb skeleton"></div>
-      <figcaption>
-        <div class="skeleton skeleton-url"></div>
-        <div class="skeleton skeleton-engine"></div>
-      </figcaption>
-    `;
-
-    container.appendChild(sk);
-  }
-
-  skeletons += count;
-}
-
 window.addEventListener('scroll', () => {
   const scrollTop = window.scrollY || window.pageYOffset;
   const windowHeight = window.innerHeight;
@@ -308,9 +314,9 @@ window.addEventListener('scroll', () => {
     batchLoading = true; // mark that we are loading
 
     if (currentTab === "images") {
-        createImageSkeletons(numImageSkels, skeletons);
+        createImageSkeletons(numImageSkels);
     } else {
-        createSearchSkeletons(numSearchSkels, skeletons);
+        createSearchSkeletons(numSearchSkels);
     }
 
     if (!polling) {
@@ -327,3 +333,10 @@ function onSearchSubmit() {
   document.getElementById("search-type").value = currentTab;
   return true;
 }
+
+// `search.html.hbs` wires these up via inline `onsubmit`/`onclick` handlers,
+// which look functions up on `window` — plain top-level `function`
+// declarations aren't implicitly global anymore now that this file is an ES
+// module, so they need to be attached explicitly.
+window.onSearchSubmit = onSearchSubmit;
+window.get_query = get_query;

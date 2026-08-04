@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use rocket::{
-    Orbit, Request, Response, Rocket,
+    Build, Orbit, Request, Response, Rocket,
     fairing::{Fairing, Info, Kind},
     fs::FileServer,
     http::Status,
     response::Redirect,
-    serde::{Serialize, json::Json},
+    serde::{Deserialize, Serialize, json::Json},
 };
 use rocket_dyn_templates::{Template, context};
 
@@ -20,6 +20,18 @@ use rate_limit::{RateLimited, RateLimiter};
 
 #[macro_use]
 extern crate rocket;
+
+/// Rejected outright rather than handed to the engines — keeps `start + count`
+/// from ever overflowing and caps how deep a client can push pagination in
+/// one request.
+const MAX_START: usize = 10_000;
+const MAX_COUNT: usize = 25;
+
+/// Cache-busts static assets referenced from templates (`?v={{version}}`):
+/// `CacheFairing` sets a 24h `max-age` on `/static/*`, so without this a
+/// deploy that changes `search.js`/`styles.css` could leave stale copies in
+/// clients' caches for up to a day.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Resolves an asset dir from `env_var` if set, otherwise falls back to a path
 /// relative to this crate (baked in at compile time via `CARGO_MANIFEST_DIR`).
@@ -41,10 +53,7 @@ fn resolve_secs(env_var: &str, default_secs: u64) -> Duration {
         .unwrap_or_else(|| Duration::from_secs(default_secs))
 }
 
-#[rocket::main]
-async fn main() -> Result<(), rocket::Error> {
-    init_db().await;
-
+fn build_rocket() -> Rocket<Build> {
     let static_dir = resolve_dir("STATIC_DIR", concat!(env!("CARGO_MANIFEST_DIR"), "/static"));
     let template_dir = resolve_dir(
         "TEMPLATE_DIR",
@@ -56,7 +65,7 @@ async fn main() -> Result<(), rocket::Error> {
 
     let figment = rocket::Config::figment().merge(("template_dir", template_dir));
 
-    let _rocket = rocket::custom(figment)
+    rocket::custom(figment)
         .attach(Template::fairing())
         .attach(CacheFairing)
         .attach(CacheCleanupFairing {
@@ -66,10 +75,13 @@ async fn main() -> Result<(), rocket::Error> {
         .manage(RateLimiter::default())
         .mount("/static", FileServer::from(static_dir))
         .mount("/", routes![index, empty_search, search, query, health])
-        .ignite()
-        .await?
-        .launch()
-        .await?;
+}
+
+#[rocket::main]
+async fn main() -> Result<(), rocket::Error> {
+    init_db().await;
+
+    build_rocket().ignite().await?.launch().await?;
 
     Ok(())
 }
@@ -144,7 +156,8 @@ fn index() -> Template {
     Template::render(
         "index",
         context! {
-            title: "Homepage"
+            title: "Homepage",
+            version: VERSION,
         },
     )
 }
@@ -163,13 +176,6 @@ fn health() -> Status {
     Status::Ok
 }
 
-#[derive(Serialize)]
-#[serde(crate = "rocket::serde")]
-pub struct TabFlags {
-    general: bool,
-    images: bool,
-}
-
 #[allow(unused_variables)]
 #[get("/search?<t>&<q>")]
 fn search(t: Option<String>, q: &str) -> Template {
@@ -177,6 +183,7 @@ fn search(t: Option<String>, q: &str) -> Template {
         "search",
         context! {
             title: "Search",
+            version: VERSION,
         },
     )
 }
@@ -188,6 +195,24 @@ pub enum QueryResults {
     Images(SearchResponse<ImageResult>),
 }
 
+/// Everything `/query` returns on failure is JSON too — no bare-string
+/// bodies — so clients never need to sniff response text to tell an error
+/// from a result.
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(crate = "rocket::serde")]
+pub struct ApiErrorBody {
+    error: String,
+}
+
+fn api_error(status: Status, message: impl Into<String>) -> (Status, Json<ApiErrorBody>) {
+    (
+        status,
+        Json(ApiErrorBody {
+            error: message.into(),
+        }),
+    )
+}
+
 #[get("/query?<tab>&<query>&<start>&<count>")]
 async fn query(
     _limit: RateLimited,
@@ -195,10 +220,18 @@ async fn query(
     query: &str,
     start: usize,
     count: usize,
-) -> Result<Json<QueryResults>, String> {
-    // Validate count
-    if count > 25 {
-        return Err("maximum allowed count is 25".into());
+) -> Result<Json<QueryResults>, (Status, Json<ApiErrorBody>)> {
+    if count == 0 || count > MAX_COUNT {
+        return Err(api_error(
+            Status::BadRequest,
+            format!("count must be between 1 and {MAX_COUNT}"),
+        ));
+    }
+    if start > MAX_START {
+        return Err(api_error(
+            Status::BadRequest,
+            format!("start must not exceed {MAX_START}"),
+        ));
     }
 
     let results = match tab {
@@ -216,18 +249,20 @@ async fn query(
             .search()
             .await
             .map(QueryResults::Images),
-        _ => return Err("Unknown Tab query requested".into()),
+        _ => return Err(api_error(Status::BadRequest, "unknown tab requested")),
     }
     .map_err(|e| {
+        let status = match &e {
+            FetchError::Cache(_) => Status::InternalServerError,
+            FetchError::AllEnginesFailed => Status::BadGateway,
+        };
         match &e {
-            FetchError::Sqlx(error) => log::error!("cache db error: {error}"),
-            FetchError::Engine(error) => log::warn!("engine error: {error:?}"),
-            FetchError::Timeouts => log::warn!("query timed out: tab={tab} query={query:?}"),
+            FetchError::Cache(cache_err) => log::error!("cache db error: {cache_err}"),
             FetchError::AllEnginesFailed => {
                 log::error!("all engines failed: tab={tab} query={query:?}")
             }
         }
-        "Query Error".to_string()
+        api_error(status, "query failed")
     })?;
 
     log::debug!("query ok: tab={tab} query={query:?} results={}", results_len(&results));
@@ -239,5 +274,111 @@ fn results_len(results: &QueryResults) -> usize {
     match results {
         QueryResults::General(r) => r.results.len(),
         QueryResults::Images(r) => r.results.len(),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use rocket::local::asynchronous::Client;
+
+    async fn client() -> Client {
+        Client::tracked(build_rocket())
+            .await
+            .expect("failed to build test rocket instance")
+    }
+
+    #[rocket::async_test]
+    async fn health_returns_ok() {
+        let client = client().await;
+        let res = client.get("/health").dispatch().await;
+        assert_eq!(res.status(), Status::Ok);
+    }
+
+    #[rocket::async_test]
+    async fn index_renders() {
+        let client = client().await;
+        let res = client.get("/").dispatch().await;
+        assert_eq!(res.status(), Status::Ok);
+    }
+
+    #[rocket::async_test]
+    async fn search_page_renders() {
+        let client = client().await;
+        let res = client.get("/search?q=rust&t=general").dispatch().await;
+        assert_eq!(res.status(), Status::Ok);
+    }
+
+    #[rocket::async_test]
+    async fn empty_search_redirects_home() {
+        let client = client().await;
+        let res = client.get("/search").dispatch().await;
+        assert_eq!(res.status(), Status::SeeOther);
+        assert_eq!(res.headers().get_one("Location"), Some("/"));
+    }
+
+    #[rocket::async_test]
+    async fn query_rejects_count_over_max() {
+        let client = client().await;
+        let res = client
+            .get("/query?tab=general&query=rust&start=0&count=999")
+            .dispatch()
+            .await;
+        assert_eq!(res.status(), Status::BadRequest);
+        let body: ApiErrorBody = res.into_json().await.expect("expected a JSON error body");
+        assert!(body.error.contains("count"));
+    }
+
+    #[rocket::async_test]
+    async fn query_rejects_count_of_zero() {
+        let client = client().await;
+        let res = client
+            .get("/query?tab=general&query=rust&start=0&count=0")
+            .dispatch()
+            .await;
+        assert_eq!(res.status(), Status::BadRequest);
+    }
+
+    #[rocket::async_test]
+    async fn query_rejects_start_over_max() {
+        let client = client().await;
+        let res = client
+            .get("/query?tab=general&query=rust&start=999999999&count=10")
+            .dispatch()
+            .await;
+        assert_eq!(res.status(), Status::BadRequest);
+        let body: ApiErrorBody = res.into_json().await.expect("expected a JSON error body");
+        assert!(body.error.contains("start"));
+    }
+
+    #[rocket::async_test]
+    async fn query_rejects_unknown_tab() {
+        let client = client().await;
+        let res = client
+            .get("/query?tab=bogus&query=rust&start=0&count=10")
+            .dispatch()
+            .await;
+        assert_eq!(res.status(), Status::BadRequest);
+        let body: ApiErrorBody = res.into_json().await.expect("expected a JSON error body");
+        assert!(body.error.contains("tab"));
+    }
+
+    #[rocket::async_test]
+    async fn query_enforces_rate_limit() {
+        let client = client().await;
+        let mut saw_429 = false;
+        // MAX_REQUESTS_PER_WINDOW is 30; a bogus tab short-circuits before
+        // any network call, so this stays fast and hits the limiter directly.
+        for _ in 0..40 {
+            let res = client
+                .get("/query?tab=bogus&query=rust&start=0&count=1")
+                .dispatch()
+                .await;
+            if res.status() == Status::TooManyRequests {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(saw_429, "expected to eventually be rate limited");
     }
 }

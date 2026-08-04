@@ -1,9 +1,15 @@
+//! Pure, cache-free adapters for scraping privacy-respecting search engines.
+//!
+//! This crate knows nothing about caching or ranking — it only knows how to
+//! turn `(query, start)` into a page of raw results for a given engine.
+//! Pair it with a cache/merge layer (e.g. `search-cache`) to get pagination,
+//! deduplication, and persistence.
+
 use async_trait::async_trait;
 use rand::seq::IndexedRandom;
 use reqwest::Client;
 use scraper::{Html, Selector};
-
-use crate::cache::{self, ImagesRow, ResultRow};
+use serde::{Deserialize, Serialize};
 
 mod brave;
 mod duckduckgo;
@@ -11,12 +17,40 @@ mod duckduckgo;
 pub use brave::Brave;
 pub use duckduckgo::DuckDuckGo;
 
+/// One raw text-search hit, straight off an engine's results page — no
+/// ranking, dedup, or engine attribution applied yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawResult {
+    pub url: String,
+    pub title: String,
+    pub description: String,
+}
+
+/// One raw image-search hit, straight off an engine's results page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawImage {
+    pub url: String,
+    pub title: String,
+}
+
 #[derive(Debug)]
 pub enum EngineError {
     ReqwestError(reqwest::Error),
     ParseError(String),
     Timeout, // engine timeout
 }
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineError::ReqwestError(e) => write!(f, "request failed: {e}"),
+            EngineError::ParseError(e) => write!(f, "parse error: {e}"),
+            EngineError::Timeout => write!(f, "engine timed out"),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {}
 
 #[async_trait]
 pub trait EngineInfo: Clone + Send {
@@ -33,7 +67,7 @@ pub trait SearchEngine: EngineInfo + Clone + Send {
         query: &str,
         start: usize,
         count: usize,
-    ) -> Result<Vec<ResultRow>, EngineError>;
+    ) -> Result<Vec<RawResult>, EngineError>;
 }
 
 #[async_trait]
@@ -44,7 +78,7 @@ pub trait ImageEngine: EngineInfo + Clone + Send {
         query: &str,
         start: usize,
         count: usize,
-    ) -> Result<Vec<ImagesRow>, EngineError>;
+    ) -> Result<Vec<RawImage>, EngineError>;
 }
 
 static USER_AGENTS: &[&str] = &[
@@ -146,7 +180,7 @@ pub fn parse_search(
     title_selector: &'static str,
     href_selector: &'static str,
     description_selector: &'static str,
-) -> Vec<ResultRow> {
+) -> Vec<RawResult> {
     let html = Html::parse_document(html);
 
     let results_selector = Selector::parse(results_selector).expect(PARSE_ERROR);
@@ -157,7 +191,7 @@ pub fn parse_search(
     let mut results = Vec::new();
 
     for result in html.select(&results_selector) {
-        results.push(ResultRow {
+        results.push(RawResult {
             url: result
                 .select(&href_selector)
                 .next()
@@ -187,7 +221,7 @@ pub fn parse_images(
     images_selector: &'static str,
     title_selector: &'static str,
     img_selector: &'static str,
-) -> Vec<ImagesRow> {
+) -> Vec<RawImage> {
     let html = Html::parse_document(html);
 
     let images_selector = Selector::parse(images_selector).expect(PARSE_ERROR);
@@ -197,7 +231,7 @@ pub fn parse_images(
     let mut images = Vec::new();
 
     for result in html.select(&images_selector) {
-        images.push(ImagesRow {
+        images.push(RawImage {
             url: result
                 .select(&img_selector)
                 .next()

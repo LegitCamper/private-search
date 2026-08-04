@@ -292,3 +292,28 @@ figcaption {
     margin-left: auto;
 }
 
+.query-error-banner {
+    max-width: 700px;
+    width: 95%;
+    margin: 0.75rem auto 0 auto;
+    margin-top: 125px;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    background-color: #313244;
+    border: 1px solid #f38ba8;
+    color: #f38ba8;
+    font-size: 0.9rem;
+    text-align: center;
+}
+
+.query-error-banner[hidden] {
+    display: none;
+}
+
+.empty-state {
+    text-align: center;
+    color: #a6adc8;
+    padding: 2rem 1rem;
+    font-size: 1rem;
+}
+

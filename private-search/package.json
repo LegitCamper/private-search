@@ -1,0 +1,8 @@
+{
+  "name": "private-search-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test static/*.test.js"
+  }
+}

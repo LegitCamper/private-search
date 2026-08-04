@@ -1,0 +1,13 @@
+[package]
+name = "search-cache"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sqlx = { version = "=0.8.1", features = ["runtime-tokio", "sqlite", "chrono"] }
+chrono = { version = "0.4.42", features = ["serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+async-trait = "0.1.89"
+log = "0.4"

@@ -4,14 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-reqwest = "0.12.24"
-scraper = "0.24.0"
-serde = "1.0.228"
-sqlx = { version = "=0.8.1", features = ["runtime-tokio", "sqlite", "chrono"] }
+search-engines = { path = "../search-engines" }
+search-cache = { path = "../cache" }
+serde = { version = "1.0.228", features = ["derive"] }
 chrono = { version = "0.4.42", features = ["serde"] }
-percent-encoding = "2.3.2"
-regex = "1.12.2"
-rand = "0.9.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 async-trait = "0.1.89"
 log = "0.4"
+
+[dev-dependencies]
+serde_json = "1.0"

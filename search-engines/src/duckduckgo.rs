@@ -2,9 +2,7 @@ use async_trait::async_trait;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode, utf8_percent_encode};
 use reqwest::Url;
 
-use crate::engines::{
-    EngineError, EngineInfo, SearchEngine, cache::ResultRow, new_rand_client, parse_search,
-};
+use crate::{EngineError, EngineInfo, RawResult, SearchEngine, new_rand_client, parse_search};
 
 #[derive(Clone)]
 pub struct DuckDuckGo;
@@ -41,7 +39,7 @@ impl SearchEngine for DuckDuckGo {
         query: &str,
         start: usize,
         _count: usize,
-    ) -> Result<Vec<ResultRow>, EngineError> {
+    ) -> Result<Vec<RawResult>, EngineError> {
         let resp = new_rand_client()
             .get(build_search_url(query, start))
             .send()
@@ -59,16 +57,20 @@ impl SearchEngine for DuckDuckGo {
     }
 }
 
-pub fn parse_response(html: &str) -> Result<Vec<ResultRow>, EngineError> {
+pub fn parse_response(html: &str) -> Result<Vec<RawResult>, EngineError> {
+    // Both organic and sponsored results are wrapped in the same
+    // `duckduckgo.com/l/?uddg=` click-tracking redirect these days, so a
+    // result's href can't tell ads apart from organic hits anymore — DDG
+    // marks ads on the *result container* itself via a `result--ad` class
+    // instead, so exclude those at the selector level.
     let results = parse_search(
         html,
-        ".serp__results .result",
+        ".serp__results .result:not(.result--ad)",
         ".result__a",
         ".result__a",
         ".result__snippet",
     )
     .into_iter()
-    .filter(|r| !is_sponsored(&r.url))
     .map(|mut r| {
         r.url = extract_ddg_url(&r.url).unwrap();
         r
@@ -90,12 +92,6 @@ fn extract_ddg_url(ddg_href: &str) -> Option<String> {
         }
     }
     Some(ddg_href.to_string()) // fallback to raw href
-}
-
-fn is_sponsored(href: &str) -> bool {
-    href.contains("duckduckgo.com/l/?")
-        || href.contains("duckduckgo.com/y.js")
-        || href.contains("duckduckgo.com/?uddg=")
 }
 
 #[cfg(test)]
@@ -126,16 +122,15 @@ mod test {
         );
     }
 
+    /// Non-ASCII queries must survive a full percent-encode round trip —
+    /// regression guard for "encoding support" (unicode search terms are a
+    /// normal, not edge-case, input for a search engine).
     #[test]
-    fn is_sponsored_detects_ad_link_patterns() {
-        assert!(is_sponsored(
-            "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com"
-        ));
-        assert!(is_sponsored("//duckduckgo.com/y.js?ad_provider=bing"));
-        assert!(is_sponsored(
-            "//duckduckgo.com/?uddg=https%3A%2F%2Fexample.com"
-        ));
-        assert!(!is_sponsored("https://example.com"));
+    fn build_search_url_encodes_non_ascii_query() {
+        assert_eq!(
+            build_search_url("café 日本語", 0),
+            "https://html.duckduckgo.com/html?q=caf%C3%A9%20%E6%97%A5%E6%9C%AC%E8%AA%9E"
+        );
     }
 
     #[test]
@@ -161,16 +156,18 @@ mod test {
         assert_eq!(extract_ddg_url(href), Some(href.to_string()));
     }
 
-    // Organic links are direct hrefs; only ads go through a tracking redirect
-    // (`duckduckgo.com/l/?` or `/y.js`), per `is_sponsored`.
+    // Mirrors DDG's real current markup (confirmed against a live fetch):
+    // organic *and* sponsored links both go through the same
+    // `duckduckgo.com/l/?uddg=` tracking redirect, so only the result
+    // container's `result--ad` class distinguishes an ad from an organic hit.
     const SEARCH_FIXTURE: &str = r#"
         <div class="serp__results">
-            <div class="result">
-                <a class="result__a" href="https://example.com/rust">Rust Programming Language</a>
+            <div class="result results_links results_links_deep web-result ">
+                <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Frust&rut=abc">Rust Programming Language</a>
                 <a class="result__snippet">A systems programming language.</a>
             </div>
-            <div class="result">
-                <a class="result__a" href="//duckduckgo.com/y.js?ad_provider=bing&rut=xyz">Sponsored: Learn Rust Fast</a>
+            <div class="result results_links results_links_deep result--ad ">
+                <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fad&rut=xyz">Sponsored: Learn Rust Fast</a>
                 <a class="result__snippet">Sponsored description.</a>
             </div>
         </div>
@@ -186,7 +183,7 @@ mod test {
         assert_eq!(results[0].description, "A systems programming language.");
     }
 
-    use crate::engines::fixtures::cached_html;
+    use crate::fixtures::cached_html;
 
     // DDG bot-walls datacenter IPs with an "anomaly" page; retry from a
     // residential connection if the first-run fetch fails here.

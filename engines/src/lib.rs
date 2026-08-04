@@ -1,5 +1,12 @@
-#![allow(async_fn_in_trait)]
-//! Fan out a query across privacy-respecting search engines, cache results in SQLite, merge and rank them.
+//! Fan out a query across privacy-respecting search engines, cache/rank/paginate
+//! the results, and expose a simple search API.
+//!
+//! This crate is the *opinionated* glue layer: it wires the pure engine
+//! adapters in [`search_engines`] to the generic ranked-merge cache in
+//! [`search_cache`], supplying our own domain-word ranking policy. A
+//! different consumer who wants different ranking (or a different cache
+//! backend) can depend on `search-engines`/`search-cache` directly instead
+//! of this crate.
 //!
 //! [`SearchBuilder`] and [`ImageSearchBuilder`] are the main entry points:
 //!
@@ -18,88 +25,58 @@
 //! # }
 //! ```
 
-use serde::Serialize;
-use sqlx::SqlitePool;
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, HashMap, HashSet},
-    fmt,
-    pin::Pin,
-    sync::{Arc, Mutex as StdMutex},
-    time::Duration,
-};
-use tokio::{
-    sync::{Mutex as AsyncMutex, OnceCell},
-    task::JoinSet,
-    time::timeout,
-};
-
-use crate::{
-    cache::{ImagesRow, ResultRow},
-    engines::{Brave, DuckDuckGo, EngineError, EngineInfo, ImageEngine, SearchEngine},
-};
-
-mod cache;
-pub mod engines;
+use async_trait::async_trait;
+use search_cache::{CacheableRow, EngineOutcome, EngineSource, MergedCache, Ranker};
+use search_engines::{Brave, DuckDuckGo, EngineInfo, ImageEngine, SearchEngine};
+use serde::{Deserialize, Serialize};
+use std::{cmp::Ordering, fmt, sync::Arc, time::Duration};
+use tokio::sync::OnceCell;
 
 const ENGINE_TIMEOUT: u64 = 3; // seconds
 const DEFAULT_SEARCH_COUNT: usize = 10;
 const DEFAULT_IMAGE_COUNT: usize = 50;
-/// Caps extra engine-page fetches per call, so a deep `start` or broken pagination can't loop forever.
-const MAX_ENGINE_PAGES_PER_CALL: usize = 10;
-
-static SQLPOOL: OnceCell<SqlitePool> = OnceCell::const_new();
-
-async fn get_db() -> &'static SqlitePool {
-    SQLPOOL
-        .get_or_init(|| async { cache::init().await.expect("Failed to init cache db") })
-        .await
-}
-
-/// Per-`(engine, query)` locks so concurrent requests for the same search
-/// (e.g. duplicate/overlapping polls from the client) don't both miss the
-/// cache and fire off redundant engine requests + concurrent SQLite writes —
-/// the latter of which can deadlock/`database is locked` and leave the
-/// client stuck retrying forever. The second caller blocks until the first
-/// finishes, then re-checks the now-populated cache instead of re-fetching.
-static QUERY_LOCKS: StdMutex<Option<HashMap<String, Arc<AsyncMutex<()>>>>> = StdMutex::new(None);
-
-async fn lock_for_query(key: String) -> Arc<AsyncMutex<()>> {
-    let mut guard = QUERY_LOCKS.lock().unwrap();
-    guard
-        .get_or_insert_with(HashMap::new)
-        .entry(key)
-        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-        .clone()
-}
-
-/// Drops the map entry once nobody else is waiting on it, so the map doesn't
-/// grow forever as distinct queries accumulate over the process lifetime.
-fn release_query_lock(key: &str, lock: Arc<AsyncMutex<()>>) {
-    let mut guard = QUERY_LOCKS.lock().unwrap();
-    if let Some(map) = guard.as_mut() {
-        // 2 = our local `lock` clone + the one held in the map.
-        if Arc::strong_count(&lock) == 2 {
-            map.remove(key);
-        }
-    }
-}
+/// Hint passed to an engine adapter's own page size — most of ours ignore it
+/// and return whatever a real page contains (see `search-engines`).
+const ENGINE_PAGE_HINT: usize = 20;
 
 pub async fn init_db() {
-    get_db().await;
+    search_cache::shared_pool().await;
 }
 
-/// Purges cached queries (and their now-orphaned results/images) older than
-/// `max_age`. Returns the number of queries purged.
+/// Purges cached queries (and their now-orphaned rows) older than `max_age`.
+/// Returns the number of queries purged.
 ///
 /// This crate never calls this on its own — callers (e.g. the `private-search`
 /// binary) are expected to schedule it periodically, since only they know
 /// what cadence/retention makes sense for their deployment.
 pub async fn clean_cache(max_age: Duration) -> Result<u64, FetchError> {
-    let pool = get_db().await;
-    let max_age = chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::MAX);
-    let cutoff = chrono::Utc::now().naive_utc() - max_age;
-    Ok(cache::purge_stale_queries(pool, cutoff).await?)
+    let pool = search_cache::shared_pool().await;
+    Ok(search_cache::clean_cache(pool, max_age).await?)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedResult {
+    url: String,
+    title: String,
+    description: String,
+}
+
+impl CacheableRow for CachedResult {
+    fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedImage {
+    url: String,
+    title: String,
+}
+
+impl CacheableRow for CachedImage {
+    fn url(&self) -> &str {
+        &self.url
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,38 +122,29 @@ impl PartialOrd for ImageResult {
 
 #[derive(Debug)]
 pub enum FetchError {
-    Sqlx(sqlx::Error),
-    Engine(EngineError),
+    Cache(search_cache::CacheError),
+    /// Every requested engine was contacted this call and every one of them
+    /// failed/timed out, and there was nothing already cached to fall back
+    /// on — a genuine total outage, not just "no more results".
     AllEnginesFailed,
-    Timeouts,
 }
 
 impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FetchError::Sqlx(e) => write!(f, "cache error: {e}"),
-            FetchError::Engine(e) => write!(f, "engine error: {e:?}"),
+            FetchError::Cache(e) => write!(f, "cache error: {e}"),
             FetchError::AllEnginesFailed => write!(f, "all engines failed"),
-            FetchError::Timeouts => write!(f, "search timed out"),
         }
     }
 }
 
 impl std::error::Error for FetchError {}
 
-impl From<sqlx::Error> for FetchError {
-    fn from(e: sqlx::Error) -> Self {
-        FetchError::Sqlx(e)
+impl From<search_cache::CacheError> for FetchError {
+    fn from(e: search_cache::CacheError) -> Self {
+        FetchError::Cache(e)
     }
 }
-
-impl From<EngineError> for FetchError {
-    fn from(e: EngineError) -> Self {
-        FetchError::Engine(e)
-    }
-}
-
-type EngineFuture<T> = Pin<Box<dyn Future<Output = Result<Vec<T>, FetchError>> + Send>>;
 
 /// How an individual engine fared on a given call; carried alongside the
 /// merged results so callers (and UIs) can show e.g. "DuckDuckGo timed out".
@@ -186,6 +154,16 @@ pub enum EngineStatus {
     Ok,
     TimedOut,
     Failed(String),
+}
+
+impl From<&EngineOutcome> for EngineStatus {
+    fn from(o: &EngineOutcome) -> Self {
+        match o {
+            EngineOutcome::Ok => EngineStatus::Ok,
+            EngineOutcome::TimedOut => EngineStatus::TimedOut,
+            EngineOutcome::Failed(msg) => EngineStatus::Failed(msg.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,66 +179,144 @@ pub struct EngineReport {
 pub struct SearchResponse<T> {
     pub results: Vec<T>,
     pub engines: Vec<EngineReport>,
-    /// Whether at least one engine returned a full page, meaning the client
-    /// should keep polling (with an advanced `start`) instead of assuming
-    /// this is the last batch.
+    /// Whether there are more results beyond this page — a real exhaustion
+    /// signal from the cache, not a "was this page full" guess.
     #[serde(rename = "hasMore")]
     pub has_more: bool,
 }
 
-/// Runs engine futures concurrently under a shared timeout; fails only if every engine failed.
-/// Keeps results grouped per engine (rather than flattening immediately) so
-/// callers can tell whether any single engine returned a full page.
-async fn gather<T: Send + 'static>(
-    futures: Vec<(&'static str, EngineFuture<T>)>,
-    timeout_duration: Duration,
-) -> Result<(Vec<(&'static str, Vec<T>)>, Vec<EngineReport>), FetchError> {
-    let mut set = JoinSet::new();
+/// Ranks a freshly-fetched batch by how many (non-stopword) query terms
+/// appear in the result's domain — a cheap, deterministic relevance signal
+/// good enough to prefer e.g. `rust-lang.org` over an unrelated blog post
+/// for the query "rust". Runs once, at cache-insertion time, on each new
+/// batch — never re-run over already-persisted rows (see [`search_cache`]'s
+/// append-only merge order).
+pub fn sort_results<T: CacheableRow>(mut results: Vec<T>, query: &str) -> Vec<T> {
+    let stop = ["the", "and", "or", "of", "for", "in", "on", "at"];
+    let words: Vec<String> = query
+        .split_whitespace()
+        .filter(|w| !stop.contains(&w.to_lowercase().as_str()))
+        .map(str::to_lowercase)
+        .collect();
 
-    for (name, fut) in futures {
-        set.spawn(async move { (name, timeout(timeout_duration, fut).await) });
-    }
+    fn score(url: &str, words: &[String]) -> u8 {
+        let dom = url
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
 
-    let per_engine = timeout(timeout_duration, set.join_all())
-        .await
-        .map_err(|_| FetchError::Timeouts)?;
-
-    let mut grouped = Vec::new();
-    let mut reports = Vec::new();
-    let mut any_success = false;
-
-    for (name, engine_result) in per_engine {
-        match engine_result {
-            Ok(Ok(rows)) => {
-                any_success = true;
-                grouped.push((name, rows));
-                reports.push(EngineReport {
-                    engine: name.to_string(),
-                    status: EngineStatus::Ok,
-                });
-            }
-            Ok(Err(e)) => {
-                log::warn!("engine \"{name}\" failed: {e}");
-                reports.push(EngineReport {
-                    engine: name.to_string(),
-                    status: EngineStatus::Failed(e.to_string()),
-                });
-            }
-            Err(_) => {
-                log::warn!("engine \"{name}\" timed out");
-                reports.push(EngineReport {
-                    engine: name.to_string(),
-                    status: EngineStatus::TimedOut,
-                });
-            }
+        let hits = words.iter().filter(|w| dom.contains(*w)).count();
+        if hits == words.len() {
+            2
+        }
+        // all words
+        else if hits > 0 {
+            1
+        }
+        // some words
+        else {
+            0
         }
     }
 
-    if !any_success {
-        return Err(FetchError::AllEnginesFailed);
+    results.sort_by_cached_key(|r| std::cmp::Reverse(score(r.url(), &words)));
+    results
+}
+
+struct DomainWordRanker;
+
+impl Ranker<CachedResult> for DomainWordRanker {
+    fn rank(&self, query: &str, batch: Vec<CachedResult>) -> Vec<CachedResult> {
+        sort_results(batch, query)
+    }
+}
+
+/// Images have no per-engine text relevance signal worth scoring — just a
+/// deterministic order (alphabetical by URL) so pagination is stable.
+struct UrlSortRanker;
+
+impl Ranker<CachedImage> for UrlSortRanker {
+    fn rank(&self, _query: &str, mut batch: Vec<CachedImage>) -> Vec<CachedImage> {
+        batch.sort_by(|a, b| a.url.cmp(&b.url));
+        batch
+    }
+}
+
+struct BraveTextSource;
+
+#[async_trait]
+impl EngineSource<CachedResult> for BraveTextSource {
+    fn name(&self) -> &'static str {
+        Brave.name()
     }
 
-    Ok((grouped, reports))
+    async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<CachedResult>, String> {
+        Brave
+            .search_results(query, start, ENGINE_PAGE_HINT)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|r| CachedResult {
+                        url: r.url,
+                        title: r.title,
+                        description: r.description,
+                    })
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }
+}
+
+struct DdgTextSource;
+
+#[async_trait]
+impl EngineSource<CachedResult> for DdgTextSource {
+    fn name(&self) -> &'static str {
+        DuckDuckGo.name()
+    }
+
+    async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<CachedResult>, String> {
+        DuckDuckGo
+            .search_results(query, start, ENGINE_PAGE_HINT)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|r| CachedResult {
+                        url: r.url,
+                        title: r.title,
+                        description: r.description,
+                    })
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }
+}
+
+struct BraveImageSource;
+
+#[async_trait]
+impl EngineSource<CachedImage> for BraveImageSource {
+    fn name(&self) -> &'static str {
+        Brave.name()
+    }
+
+    async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<CachedImage>, String> {
+        Brave
+            .search_images(query, start, ENGINE_PAGE_HINT)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|r| CachedImage {
+                        url: r.url,
+                        title: r.title,
+                    })
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,12 +338,64 @@ impl SearchEngines {
         }
     }
 
-    fn fetch(self, query: String, start: usize, count: usize) -> EngineFuture<SearchResult> {
+    fn source(self) -> Arc<dyn EngineSource<CachedResult>> {
         match self {
-            Self::Brave => Box::pin(fetch_or_cache_result(Brave, query, start, count)),
-            Self::DuckDuckGo => Box::pin(fetch_or_cache_result(DuckDuckGo, query, start, count)),
+            Self::Brave => Arc::new(BraveTextSource),
+            Self::DuckDuckGo => Arc::new(DdgTextSource),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageEngines {
+    Brave,
+}
+
+impl ImageEngines {
+    /// Every known image-search engine; the default set for [`ImageSearchBuilder`].
+    pub fn all() -> Vec<Self> {
+        vec![Self::Brave]
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Brave => Brave.name(),
+        }
+    }
+
+    fn source(self) -> Arc<dyn EngineSource<CachedImage>> {
+        match self {
+            Self::Brave => Arc::new(BraveImageSource),
+        }
+    }
+}
+
+static TEXT_CACHE: OnceCell<MergedCache<CachedResult>> = OnceCell::const_new();
+
+async fn text_cache() -> &'static MergedCache<CachedResult> {
+    TEXT_CACHE
+        .get_or_init(|| async {
+            let pool = search_cache::shared_pool().await.clone();
+            MergedCache::new(pool, "text", Arc::new(DomainWordRanker))
+        })
+        .await
+}
+
+static IMAGE_CACHE: OnceCell<MergedCache<CachedImage>> = OnceCell::const_new();
+
+async fn image_cache() -> &'static MergedCache<CachedImage> {
+    IMAGE_CACHE
+        .get_or_init(|| async {
+            let pool = search_cache::shared_pool().await.clone();
+            MergedCache::new(pool, "image", Arc::new(UrlSortRanker))
+        })
+        .await
+}
+
+/// True only when there is nothing usable to return: every requested engine
+/// was actually contacted this call, and none of them succeeded.
+fn all_contacted_engines_failed(outcomes: &[(String, EngineOutcome)]) -> bool {
+    !outcomes.is_empty() && outcomes.iter().all(|(_, o)| !matches!(o, EngineOutcome::Ok))
 }
 
 /// Builds and runs a text search across one or more engines.
@@ -328,25 +436,26 @@ impl SearchBuilder {
         self
     }
 
-    /// Offset into each engine's result list (for pagination). Default 0.
+    /// Offset into the merged result list (for pagination). Default 0.
     pub fn start(mut self, start: usize) -> Self {
         self.start = start;
         self
     }
 
-    /// Number of results to fetch per engine. Default 10.
+    /// Number of results to return. Default 10.
     pub fn count(mut self, count: usize) -> Self {
         self.count = count;
         self
     }
 
-    /// Overall timeout for the whole search. Default 3 seconds.
+    /// Per-engine, per-round timeout. Default 3 seconds.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Runs the search, merging and ranking results from every configured engine.
+    /// Runs the search, extending the merged cache as needed and ranking any
+    /// newly-discovered results by [`sort_results`].
     pub async fn search(self) -> Result<SearchResponse<SearchResult>, FetchError> {
         let engines = if self.engines.is_empty() {
             SearchEngines::all()
@@ -354,182 +463,52 @@ impl SearchBuilder {
             self.engines
         };
 
-        let futures = engines
-            .into_iter()
-            .map(|engine| (engine.name(), engine.fetch(self.query.clone(), self.start, self.count)))
-            .collect();
+        let sources: Vec<Arc<dyn EngineSource<CachedResult>>> =
+            engines.iter().map(|e| e.source()).collect();
 
-        let (grouped, engines) = gather(futures, self.timeout).await?;
-        let has_more = grouped.iter().any(|(_, rows)| rows.len() >= self.count);
-        let flat: Vec<SearchResult> = grouped.into_iter().flat_map(|(_, rows)| rows).collect();
-        let merged = merge_results(flat);
-        Ok(SearchResponse {
-            results: sort_results(merged, &self.query),
-            engines,
-            has_more,
-        })
-    }
-}
-
-fn merge_results(results: Vec<SearchResult>) -> Vec<SearchResult> {
-    let mut map: BTreeMap<String, SearchResult> = BTreeMap::new();
-
-    for row in results {
-        let key = row.url.clone();
-
-        map.entry(key)
-            .and_modify(|existing| {
-                existing.engines.extend(row.engines.clone());
-
-                if existing.description.is_empty() {
-                    existing.description = row.description.clone();
-                }
-                if existing.title.is_empty() {
-                    existing.title = row.title.clone();
-                }
-            })
-            .or_insert(row);
-    }
-
-    map.into_values().collect()
-}
-
-pub fn sort_results(mut results: Vec<SearchResult>, query: &str) -> Vec<SearchResult> {
-    let stop = ["the", "and", "or", "of", "for", "in", "on", "at"];
-    let words: Vec<String> = query
-        .split_whitespace()
-        .filter(|w| !stop.contains(&w.to_lowercase().as_str()))
-        .map(str::to_lowercase)
-        .collect();
-
-    fn score(url: &str, words: &[String]) -> u8 {
-        let dom = url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
-
-        let hits = words.iter().filter(|w| dom.contains(*w)).count();
-        if hits == words.len() {
-            2
-        }
-        // all words
-        else if hits > 0 {
-            1
-        }
-        // some words
-        else {
-            0
-        }
-    }
-
-    results.sort_by_cached_key(|r| std::cmp::Reverse(score(&r.url, &words)));
-    results
-}
-
-/// Checks the cache first; if miss, fetches from the engine and caches results.
-///
-/// This is the building block [`SearchBuilder`] is implemented on top of; use
-/// it directly if you're integrating an engine that isn't in [`SearchEngines`].
-pub async fn fetch_or_cache_result<E>(
-    engine: E,
-    query: String,
-    start: usize,
-    count: usize,
-) -> Result<Vec<SearchResult>, FetchError>
-where
-    E: SearchEngine + EngineInfo + Send,
-{
-    let pool = get_db().await;
-
-    let engine_enum = engine.name();
-    let lock_key = format!("text:{engine_enum}:{query}");
-    let lock = lock_for_query(lock_key.clone()).await;
-    let _guard = lock.lock().await;
-
-    let engine_id = cache::get_engine_id(pool, engine_enum).await?;
-
-    // Re-read the cache now that we hold the lock: if another concurrent
-    // call for this exact (engine, query) just finished, it already did the
-    // fetching for us and there's nothing left to do here.
-    let mut cached_rows = if let Some(query_row) = cache::get_query(pool, &query, engine_id).await?
-    {
-        cache::get_results_for_query(pool, query_row.id).await?
-    } else {
-        Vec::new()
-    };
-
-    let initial_cached_len = cached_rows.len();
-    let needed_end = start + count;
-    let mut seen: HashSet<String> = cached_rows.iter().map(|r| r.url.clone()).collect();
-
-    // Fetch further engine pages until the window is covered or the engine runs dry.
-    for _ in 0..MAX_ENGINE_PAGES_PER_CALL {
-        if cached_rows.len() >= needed_end {
-            break;
-        }
-
-        let fetch_start = cached_rows.len();
-        let engine_results = engine.search_results(&query, fetch_start, count).await?;
-
-        let fresh: Vec<ResultRow> = engine_results
-            .into_iter()
-            .filter(|r| seen.insert(r.url.clone()))
-            .collect();
-
-        if fresh.is_empty() {
-            break; // engine has no more (new) results
-        }
-
-        let fetched_at = chrono::Utc::now().naive_utc();
-        cache::upsert_query_with_results(pool, engine_enum, &query, fresh.clone(), fetched_at)
+        let extend = text_cache()
+            .await
+            .get_or_extend(&self.query, &sources, self.start, self.count, self.timeout)
             .await?;
 
-        cached_rows.extend(fresh);
-    }
+        if extend.rows.is_empty() && all_contacted_engines_failed(&extend.engine_outcomes) {
+            return Err(FetchError::AllEnginesFailed);
+        }
 
-    let end = cached_rows.len().min(needed_end);
-    let start = start.min(end);
+        let reports = engines
+            .iter()
+            .map(|e| {
+                let name = e.name();
+                let status = extend
+                    .engine_outcomes
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, o)| EngineStatus::from(o))
+                    .unwrap_or(EngineStatus::Ok);
+                EngineReport {
+                    engine: name.to_string(),
+                    status,
+                }
+            })
+            .collect();
 
-    drop(_guard);
-    release_query_lock(&lock_key, lock);
+        let results = extend
+            .rows
+            .into_iter()
+            .map(|r| SearchResult {
+                url: r.value.url,
+                title: r.value.title,
+                description: r.value.description,
+                engines: r.engines,
+                cached: r.cached,
+            })
+            .collect();
 
-    Ok(cached_rows[start..end]
-        .iter()
-        .enumerate()
-        .map(|(i, cr)| SearchResult {
-            url: cr.url.clone(),
-            title: cr.title.clone(),
-            description: cr.description.clone(),
-            engines: vec![engine.name().to_string()],
-            cached: start + i < initial_cached_len,
+        Ok(SearchResponse {
+            results,
+            engines: reports,
+            has_more: extend.has_more,
         })
-        .collect())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImageEngines {
-    Brave,
-}
-
-impl ImageEngines {
-    /// Every known image-search engine; the default set for [`ImageSearchBuilder`].
-    pub fn all() -> Vec<Self> {
-        vec![Self::Brave]
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Brave => Brave.name(),
-        }
-    }
-
-    fn fetch(self, query: String, start: usize, count: usize) -> EngineFuture<ImageResult> {
-        match self {
-            Self::Brave => Box::pin(fetch_or_cache_image(Brave, query, start, count)),
-        }
     }
 }
 
@@ -572,25 +551,25 @@ impl ImageSearchBuilder {
         self
     }
 
-    /// Offset into each engine's result list (for pagination). Default 0.
+    /// Offset into the merged result list (for pagination). Default 0.
     pub fn start(mut self, start: usize) -> Self {
         self.start = start;
         self
     }
 
-    /// Number of images to fetch per engine. Default 50.
+    /// Number of images to return. Default 50.
     pub fn count(mut self, count: usize) -> Self {
         self.count = count;
         self
     }
 
-    /// Overall timeout for the whole search. Default 3 seconds.
+    /// Per-engine, per-round timeout. Default 3 seconds.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
-    /// Runs the search, merging results from every configured engine.
+    /// Runs the search, extending the merged cache as needed.
     pub async fn search(self) -> Result<SearchResponse<ImageResult>, FetchError> {
         let engines = if self.engines.is_empty() {
             ImageEngines::all()
@@ -598,210 +577,151 @@ impl ImageSearchBuilder {
             self.engines
         };
 
-        let futures = engines
-            .into_iter()
-            .map(|engine| (engine.name(), engine.fetch(self.query.clone(), self.start, self.count)))
-            .collect();
+        let sources: Vec<Arc<dyn EngineSource<CachedImage>>> =
+            engines.iter().map(|e| e.source()).collect();
 
-        let (grouped, engines) = gather(futures, self.timeout).await?;
-        let has_more = grouped.iter().any(|(_, rows)| rows.len() >= self.count);
-        let flat: Vec<ImageResult> = grouped.into_iter().flat_map(|(_, rows)| rows).collect();
-        Ok(SearchResponse {
-            results: merge_images(flat),
-            engines,
-            has_more,
-        })
-    }
-}
-
-fn merge_images(images: Vec<ImageResult>) -> Vec<ImageResult> {
-    let mut map: BTreeMap<String, ImageResult> = BTreeMap::new();
-
-    for row in images {
-        let key = row.url.clone();
-
-        map.entry(key)
-            .and_modify(|existing| {
-                existing.engines.extend(row.engines.clone());
-
-                if existing.title.is_empty() {
-                    existing.title = row.title.clone();
-                }
-            })
-            .or_insert(row);
-    }
-
-    map.into_values().collect()
-}
-
-/// Checks the cache first; if miss, fetches from the engine and caches images.
-///
-/// This is the building block [`ImageSearchBuilder`] is implemented on top of;
-/// use it directly if you're integrating an engine that isn't in [`ImageEngines`].
-pub async fn fetch_or_cache_image<E>(
-    engine: E,
-    query: String,
-    start: usize,
-    count: usize,
-) -> Result<Vec<ImageResult>, FetchError>
-where
-    E: ImageEngine + EngineInfo,
-{
-    let pool = get_db().await;
-
-    let engine_enum = engine.name();
-    let lock_key = format!("image:{engine_enum}:{query}");
-    let lock = lock_for_query(lock_key.clone()).await;
-    let _guard = lock.lock().await;
-
-    let engine_id = cache::get_engine_id(pool, engine_enum).await?;
-
-    // Re-read the cache now that we hold the lock: if another concurrent
-    // call for this exact (engine, query) just finished, it already did the
-    // fetching for us and there's nothing left to do here.
-    let mut cached_rows = if let Some(query_row) = cache::get_query(pool, &query, engine_id).await?
-    {
-        cache::get_images_for_query(pool, query_row.id).await?
-    } else {
-        Vec::new()
-    };
-
-    let initial_cached_len = cached_rows.len();
-    let needed_end = start + count;
-    let mut seen: HashSet<String> = cached_rows.iter().map(|r| r.url.clone()).collect();
-
-    // Same paging loop as fetch_or_cache_result; a no-op-pagination engine just
-    // yields an empty `fresh` and exits after one page.
-    for _ in 0..MAX_ENGINE_PAGES_PER_CALL {
-        if cached_rows.len() >= needed_end {
-            break;
-        }
-
-        let fetch_start = cached_rows.len();
-        let engine_images = engine.search_images(&query, fetch_start, count).await?;
-
-        let fresh: Vec<ImagesRow> = engine_images
-            .into_iter()
-            .filter(|r| seen.insert(r.url.clone()))
-            .collect();
-
-        if fresh.is_empty() {
-            break;
-        }
-
-        let fetched_at = chrono::Utc::now().naive_utc();
-        cache::upsert_query_with_images(pool, engine_enum, &query, fresh.clone(), fetched_at)
+        let extend = image_cache()
+            .await
+            .get_or_extend(&self.query, &sources, self.start, self.count, self.timeout)
             .await?;
 
-        cached_rows.extend(fresh);
-    }
+        if extend.rows.is_empty() && all_contacted_engines_failed(&extend.engine_outcomes) {
+            return Err(FetchError::AllEnginesFailed);
+        }
 
-    let end = cached_rows.len().min(needed_end);
-    let start = start.min(end);
+        let reports = engines
+            .iter()
+            .map(|e| {
+                let name = e.name();
+                let status = extend
+                    .engine_outcomes
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, o)| EngineStatus::from(o))
+                    .unwrap_or(EngineStatus::Ok);
+                EngineReport {
+                    engine: name.to_string(),
+                    status,
+                }
+            })
+            .collect();
 
-    drop(_guard);
-    release_query_lock(&lock_key, lock);
+        let results = extend
+            .rows
+            .into_iter()
+            .map(|r| ImageResult {
+                url: r.value.url,
+                title: r.value.title,
+                engines: r.engines,
+                cached: r.cached,
+            })
+            .collect();
 
-    Ok(cached_rows[start..end]
-        .iter()
-        .enumerate()
-        .map(|(i, cr)| ImageResult {
-            url: cr.url.clone(),
-            title: cr.title.clone(),
-            engines: vec![engine.name().to_string()],
-            cached: start + i < initial_cached_len,
+        Ok(SearchResponse {
+            results,
+            engines: reports,
+            has_more: extend.has_more,
         })
-        .collect())
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Test-only engine that counts how many times it's actually invoked,
-    /// with an artificial delay so concurrent callers really do race.
-    #[derive(Clone)]
-    struct CountingEngine {
-        calls: Arc<AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl EngineInfo for CountingEngine {
-        fn name(&self) -> &'static str {
-            "CountingEngineTestOnly"
+    fn r(url: &str) -> CachedResult {
+        CachedResult {
+            url: url.to_string(),
+            title: "t".into(),
+            description: "d".into(),
         }
     }
 
-    #[async_trait::async_trait]
-    impl SearchEngine for CountingEngine {
-        async fn search_results(
-            &self,
-            _query: &str,
-            start: usize,
-            count: usize,
-        ) -> Result<Vec<ResultRow>, EngineError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    #[test]
+    fn sort_results_ranks_full_domain_match_first() {
+        let ranked = sort_results(
+            vec![
+                r("https://unrelated.example/x"),
+                r("https://partial-rust.example/x"),
+                r("https://rust-async.example/x"),
+            ],
+            "rust async",
+        );
 
-            if start > 0 {
-                return Ok(Vec::new());
-            }
-
-            Ok((0..count)
-                .map(|i| ResultRow {
-                    url: format!("https://example.com/{i}"),
-                    title: format!("title {i}"),
-                    description: "desc".into(),
-                })
-                .collect())
-        }
+        assert_eq!(ranked[0].url, "https://rust-async.example/x");
+        assert_eq!(ranked[2].url, "https://unrelated.example/x");
     }
 
-    /// Two overlapping requests for the identical (engine, query) shouldn't
-    /// both hit the engine — the second should block on the per-query lock
-    /// and then reuse what the first cached, instead of firing a redundant
-    /// engine call (and a concurrent, potentially lock-contending, DB write).
-    #[tokio::test]
-    async fn concurrent_identical_searches_only_fetch_once() {
-        // Safe: this is the only non-ignored test that touches the
-        // process-global DB singleton, so there's no cross-test race on it.
-        unsafe {
-            std::env::set_var("CACHE_DB_PATH", "/tmp/private-search-engines-dedup-test.db");
-        }
-        let _ = std::fs::remove_file("/tmp/private-search-engines-dedup-test.db");
+    #[test]
+    fn sort_results_ranks_partial_domain_match_above_no_match() {
+        let ranked = sort_results(
+            vec![
+                r("https://unrelated.example/x"),
+                r("https://rust-only.example/x"),
+            ],
+            "rust async",
+        );
 
-        let calls = Arc::new(AtomicUsize::new(0));
-        let engine = CountingEngine {
-            calls: calls.clone(),
+        assert_eq!(ranked[0].url, "https://rust-only.example/x");
+        assert_eq!(ranked[1].url, "https://unrelated.example/x");
+    }
+
+    #[test]
+    fn sort_results_is_a_stable_sort_preserving_input_order_for_ties() {
+        let ranked = sort_results(
+            vec![r("https://a.example/x"), r("https://b.example/x")],
+            "irrelevant query",
+        );
+
+        // No domain matches either way — score ties at 0, order unchanged.
+        assert_eq!(ranked[0].url, "https://a.example/x");
+        assert_eq!(ranked[1].url, "https://b.example/x");
+    }
+
+    #[test]
+    fn sort_results_ignores_stopwords_when_scoring() {
+        // "for" is a stopword; only "rust" should count toward the score.
+        let ranked = sort_results(
+            vec![
+                r("https://unrelated.example/x"),
+                r("https://rust.example/x"),
+            ],
+            "for rust",
+        );
+
+        assert_eq!(ranked[0].url, "https://rust.example/x");
+    }
+
+    /// Regression guard for "encoding/JSON support": unicode titles/
+    /// descriptions must survive a `serde_json` round trip unchanged.
+    #[test]
+    fn search_result_serializes_unicode_fields_unchanged() {
+        let result = SearchResult {
+            url: "https://example.com/日本語".to_string(),
+            title: "café ☕ — \"quoted\" <tag>".to_string(),
+            description: "مرحبا بالعالم (RTL text) 🎉".to_string(),
+            engines: vec!["Brave".to_string()],
+            cached: false,
         };
 
-        let (a, b) = tokio::join!(
-            fetch_or_cache_result(engine.clone(), "dedup race".to_string(), 0, 5),
-            fetch_or_cache_result(engine.clone(), "dedup race".to_string(), 0, 5),
-        );
+        let json = serde_json::to_string(&result).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(a.unwrap().len(), 5);
-        assert_eq!(b.unwrap().len(), 5);
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "two concurrent identical searches should only hit the engine once"
-        );
-
-        let _ = std::fs::remove_file("/tmp/private-search-engines-dedup-test.db");
+        assert_eq!(value["url"], "https://example.com/日本語");
+        assert_eq!(value["title"], "café ☕ — \"quoted\" <tag>");
+        assert_eq!(value["description"], "مرحبا بالعالم (RTL text) 🎉");
     }
 
-    /// End-to-end proof that pagination works through the full cache + builder
-    /// pipeline: page 2 disjoint from page 1, page 1 revisited from cache.
-    /// Hits real network + a scratch on-disk cache, so `#[ignore]`d.
     #[ignore]
     #[tokio::test]
     async fn test_search_builder_pagination_live() {
         // Safe: run in isolation via `--ignored --test-threads=1`, so nothing
-        // else touches the process-global DB singleton concurrently.
+        // else touches the process-global cache pool concurrently.
         unsafe {
-            std::env::set_var("CACHE_DB_PATH", "/tmp/private-search-engines-pagination-test.db");
+            std::env::set_var(
+                "CACHE_DB_PATH",
+                "/tmp/private-search-engines-pagination-test.db",
+            );
         }
         let _ = std::fs::remove_file("/tmp/private-search-engines-pagination-test.db");
 
