@@ -28,7 +28,7 @@ RUN --mount=type=cache,target=/build/target \
         --compression-level=10 \
         --parallelism=2 \
         --loader=embedded \
-        build --release; \
+        build --release --package private-search; \
     objcopy --compress-debug-sections target/sonic/x86_64-unknown-linux-gnu/release/private-search ./main
 
 
