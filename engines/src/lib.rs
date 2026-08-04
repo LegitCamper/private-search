@@ -185,12 +185,29 @@ pub struct SearchResponse<T> {
     pub has_more: bool,
 }
 
-/// Ranks a freshly-fetched batch by how many (non-stopword) query terms
-/// appear in the result's domain — a cheap, deterministic relevance signal
-/// good enough to prefer e.g. `rust-lang.org` over an unrelated blog post
-/// for the query "rust". Runs once, at cache-insertion time, on each new
-/// batch — never re-run over already-persisted rows (see [`search_cache`]'s
-/// append-only merge order).
+/// A query word matching a whole `.`/`-`-delimited domain segment (e.g.
+/// "rust" in `rust-lang.org`) is a strong, deliberate signal — someone
+/// searching "rust" almost certainly wants the Rust site itself first.
+const DOMAIN_TOKEN_MATCH: u32 = 3;
+/// A word merely appearing *somewhere* in the domain, not aligned to a
+/// segment boundary (e.g. "rust" inside `trustworthy.com`), is a much
+/// weaker, false-positive-prone signal — still worth something, but must
+/// never outrank an actual word-boundary domain match.
+const DOMAIN_SUBSTRING_MATCH: u32 = 2;
+/// A word appearing in the path rather than the domain (e.g.
+/// `example.com/blog/rust-tutorial`) is a real but weak match — the site
+/// itself isn't about the query, just one page on it happens to mention it.
+const PATH_MATCH: u32 = 1;
+
+/// Ranks a freshly-fetched batch by how closely each result's URL matches
+/// the (non-stopword) query terms — preferring the *site* the query is
+/// about (`rust-lang.org` for "rust") over a page whose URL path merely
+/// mentions the term (`some-blog.example/posts/rust-tips`), and preferring
+/// a real word-boundary domain match over a same-substring false positive
+/// (`trustworthy.com` isn't about "rust" just because it contains the
+/// letters). Runs once, at cache-insertion time, on each new batch — never
+/// re-run over already-persisted rows (see [`search_cache`]'s append-only
+/// merge order).
 pub fn sort_results<T: CacheableRow>(mut results: Vec<T>, query: &str) -> Vec<T> {
     let stop = ["the", "and", "or", "of", "for", "in", "on", "at"];
     let words: Vec<String> = query
@@ -199,27 +216,33 @@ pub fn sort_results<T: CacheableRow>(mut results: Vec<T>, query: &str) -> Vec<T>
         .map(str::to_lowercase)
         .collect();
 
-    fn score(url: &str, words: &[String]) -> u8 {
-        let dom = url
+    fn score(url: &str, words: &[String]) -> u32 {
+        let rest = url
             .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
+            .trim_start_matches("https://");
+        let (domain, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let domain = domain.to_lowercase();
+        let path = path.to_lowercase();
 
-        let hits = words.iter().filter(|w| dom.contains(*w)).count();
-        if hits == words.len() {
-            2
-        }
-        // all words
-        else if hits > 0 {
-            1
-        }
-        // some words
-        else {
-            0
-        }
+        let domain_tokens: Vec<&str> = domain
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        words
+            .iter()
+            .map(|w| {
+                if domain_tokens.contains(&w.as_str()) {
+                    DOMAIN_TOKEN_MATCH
+                } else if domain.contains(w.as_str()) {
+                    DOMAIN_SUBSTRING_MATCH
+                } else if path.contains(w.as_str()) {
+                    PATH_MATCH
+                } else {
+                    0
+                }
+            })
+            .sum()
     }
 
     results.sort_by_cached_key(|r| std::cmp::Reverse(score(r.url(), &words)));
@@ -690,6 +713,51 @@ mod test {
         );
 
         assert_eq!(ranked[0].url, "https://rust.example/x");
+    }
+
+    #[test]
+    fn sort_results_prefers_a_domain_word_boundary_match_over_a_same_substring_false_positive() {
+        // "trustworthy.com" contains the letters "rust" but isn't about
+        // Rust at all; "rust-lang.org" has "rust" as its own domain segment.
+        let ranked = sort_results(
+            vec![r("https://trustworthy.com/x"), r("https://rust-lang.org/x")],
+            "rust",
+        );
+
+        assert_eq!(ranked[0].url, "https://rust-lang.org/x");
+        assert_eq!(ranked[1].url, "https://trustworthy.com/x");
+    }
+
+    #[test]
+    fn sort_results_prefers_a_domain_match_over_a_path_only_match() {
+        // The site itself being about "rust" should outrank some other
+        // site's blog post that merely mentions "rust" in its URL path.
+        let ranked = sort_results(
+            vec![
+                r("https://some-blog.example/posts/rust-tips"),
+                r("https://rust-lang.org/learn"),
+            ],
+            "rust",
+        );
+
+        assert_eq!(ranked[0].url, "https://rust-lang.org/learn");
+        assert_eq!(ranked[1].url, "https://some-blog.example/posts/rust-tips");
+    }
+
+    #[test]
+    fn sort_results_still_ranks_a_path_only_match_above_no_match_at_all() {
+        // A path match is "a good match, not a great one" — still better
+        // than a result with no signal whatsoever.
+        let ranked = sort_results(
+            vec![
+                r("https://totally-unrelated.example/other"),
+                r("https://some-blog.example/posts/rust-tips"),
+            ],
+            "rust",
+        );
+
+        assert_eq!(ranked[0].url, "https://some-blog.example/posts/rust-tips");
+        assert_eq!(ranked[1].url, "https://totally-unrelated.example/other");
     }
 
     /// Regression guard for "encoding/JSON support": unicode titles/
