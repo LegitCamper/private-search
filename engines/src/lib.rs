@@ -22,12 +22,17 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     pin::Pin,
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
-use tokio::{sync::OnceCell, task::JoinSet, time::timeout};
+use tokio::{
+    sync::{Mutex as AsyncMutex, OnceCell},
+    task::JoinSet,
+    time::timeout,
+};
 
 use crate::{
     cache::{ImagesRow, ResultRow},
@@ -49,6 +54,35 @@ async fn get_db() -> &'static SqlitePool {
     SQLPOOL
         .get_or_init(|| async { cache::init().await.expect("Failed to init cache db") })
         .await
+}
+
+/// Per-`(engine, query)` locks so concurrent requests for the same search
+/// (e.g. duplicate/overlapping polls from the client) don't both miss the
+/// cache and fire off redundant engine requests + concurrent SQLite writes —
+/// the latter of which can deadlock/`database is locked` and leave the
+/// client stuck retrying forever. The second caller blocks until the first
+/// finishes, then re-checks the now-populated cache instead of re-fetching.
+static QUERY_LOCKS: StdMutex<Option<HashMap<String, Arc<AsyncMutex<()>>>>> = StdMutex::new(None);
+
+async fn lock_for_query(key: String) -> Arc<AsyncMutex<()>> {
+    let mut guard = QUERY_LOCKS.lock().unwrap();
+    guard
+        .get_or_insert_with(HashMap::new)
+        .entry(key)
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone()
+}
+
+/// Drops the map entry once nobody else is waiting on it, so the map doesn't
+/// grow forever as distinct queries accumulate over the process lifetime.
+fn release_query_lock(key: &str, lock: Arc<AsyncMutex<()>>) {
+    let mut guard = QUERY_LOCKS.lock().unwrap();
+    if let Some(map) = guard.as_mut() {
+        // 2 = our local `lock` clone + the one held in the map.
+        if Arc::strong_count(&lock) == 2 {
+            map.remove(key);
+        }
+    }
 }
 
 pub async fn init_db() {
@@ -154,13 +188,20 @@ pub struct EngineReport {
 pub struct SearchResponse<T> {
     pub results: Vec<T>,
     pub engines: Vec<EngineReport>,
+    /// Whether at least one engine returned a full page, meaning the client
+    /// should keep polling (with an advanced `start`) instead of assuming
+    /// this is the last batch.
+    #[serde(rename = "hasMore")]
+    pub has_more: bool,
 }
 
 /// Runs engine futures concurrently under a shared timeout; fails only if every engine failed.
+/// Keeps results grouped per engine (rather than flattening immediately) so
+/// callers can tell whether any single engine returned a full page.
 async fn gather<T: Send + 'static>(
     futures: Vec<(&'static str, EngineFuture<T>)>,
     timeout_duration: Duration,
-) -> Result<(Vec<T>, Vec<EngineReport>), FetchError> {
+) -> Result<(Vec<(&'static str, Vec<T>)>, Vec<EngineReport>), FetchError> {
     let mut set = JoinSet::new();
 
     for (name, fut) in futures {
@@ -171,7 +212,7 @@ async fn gather<T: Send + 'static>(
         .await
         .map_err(|_| FetchError::Timeouts)?;
 
-    let mut flat = Vec::new();
+    let mut grouped = Vec::new();
     let mut reports = Vec::new();
     let mut any_success = false;
 
@@ -179,7 +220,7 @@ async fn gather<T: Send + 'static>(
         match engine_result {
             Ok(Ok(rows)) => {
                 any_success = true;
-                flat.extend(rows);
+                grouped.push((name, rows));
                 reports.push(EngineReport {
                     engine: name.to_string(),
                     status: EngineStatus::Ok,
@@ -206,7 +247,7 @@ async fn gather<T: Send + 'static>(
         return Err(FetchError::AllEnginesFailed);
     }
 
-    Ok((flat, reports))
+    Ok((grouped, reports))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,11 +346,14 @@ impl SearchBuilder {
             .map(|engine| (engine.name(), engine.fetch(self.query.clone(), self.start, self.count)))
             .collect();
 
-        let (flat, engines) = gather(futures, self.timeout).await?;
+        let (grouped, engines) = gather(futures, self.timeout).await?;
+        let has_more = grouped.iter().any(|(_, rows)| rows.len() >= self.count);
+        let flat: Vec<SearchResult> = grouped.into_iter().flat_map(|(_, rows)| rows).collect();
         let merged = merge_results(flat);
         Ok(SearchResponse {
             results: sort_results(merged, &self.query),
             engines,
+            has_more,
         })
     }
 }
@@ -388,8 +432,15 @@ where
     let pool = get_db().await;
 
     let engine_enum = engine.name();
+    let lock_key = format!("text:{engine_enum}:{query}");
+    let lock = lock_for_query(lock_key.clone()).await;
+    let _guard = lock.lock().await;
+
     let engine_id = cache::get_engine_id(pool, engine_enum).await?;
 
+    // Re-read the cache now that we hold the lock: if another concurrent
+    // call for this exact (engine, query) just finished, it already did the
+    // fetching for us and there's nothing left to do here.
     let mut cached_rows = if let Some(query_row) = cache::get_query(pool, &query, engine_id).await?
     {
         cache::get_results_for_query(pool, query_row.id).await?
@@ -428,6 +479,9 @@ where
 
     let end = cached_rows.len().min(needed_end);
     let start = start.min(end);
+
+    drop(_guard);
+    release_query_lock(&lock_key, lock);
 
     Ok(cached_rows[start..end]
         .iter()
@@ -536,10 +590,13 @@ impl ImageSearchBuilder {
             .map(|engine| (engine.name(), engine.fetch(self.query.clone(), self.start, self.count)))
             .collect();
 
-        let (flat, engines) = gather(futures, self.timeout).await?;
+        let (grouped, engines) = gather(futures, self.timeout).await?;
+        let has_more = grouped.iter().any(|(_, rows)| rows.len() >= self.count);
+        let flat: Vec<ImageResult> = grouped.into_iter().flat_map(|(_, rows)| rows).collect();
         Ok(SearchResponse {
             results: merge_images(flat),
             engines,
+            has_more,
         })
     }
 }
@@ -580,8 +637,15 @@ where
     let pool = get_db().await;
 
     let engine_enum = engine.name();
+    let lock_key = format!("image:{engine_enum}:{query}");
+    let lock = lock_for_query(lock_key.clone()).await;
+    let _guard = lock.lock().await;
+
     let engine_id = cache::get_engine_id(pool, engine_enum).await?;
 
+    // Re-read the cache now that we hold the lock: if another concurrent
+    // call for this exact (engine, query) just finished, it already did the
+    // fetching for us and there's nothing left to do here.
     let mut cached_rows = if let Some(query_row) = cache::get_query(pool, &query, engine_id).await?
     {
         cache::get_images_for_query(pool, query_row.id).await?
@@ -622,6 +686,9 @@ where
     let end = cached_rows.len().min(needed_end);
     let start = start.min(end);
 
+    drop(_guard);
+    release_query_lock(&lock_key, lock);
+
     Ok(cached_rows[start..end]
         .iter()
         .enumerate()
@@ -637,6 +704,80 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Test-only engine that counts how many times it's actually invoked,
+    /// with an artificial delay so concurrent callers really do race.
+    #[derive(Clone)]
+    struct CountingEngine {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl EngineInfo for CountingEngine {
+        fn name(&self) -> &'static str {
+            "CountingEngineTestOnly"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SearchEngine for CountingEngine {
+        async fn search_results(
+            &self,
+            _query: &str,
+            start: usize,
+            count: usize,
+        ) -> Result<Vec<ResultRow>, EngineError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            if start > 0 {
+                return Ok(Vec::new());
+            }
+
+            Ok((0..count)
+                .map(|i| ResultRow {
+                    url: format!("https://example.com/{i}"),
+                    title: format!("title {i}"),
+                    description: "desc".into(),
+                })
+                .collect())
+        }
+    }
+
+    /// Two overlapping requests for the identical (engine, query) shouldn't
+    /// both hit the engine — the second should block on the per-query lock
+    /// and then reuse what the first cached, instead of firing a redundant
+    /// engine call (and a concurrent, potentially lock-contending, DB write).
+    #[tokio::test]
+    async fn concurrent_identical_searches_only_fetch_once() {
+        // Safe: this is the only non-ignored test that touches the
+        // process-global DB singleton, so there's no cross-test race on it.
+        unsafe {
+            std::env::set_var("CACHE_DB_PATH", "/tmp/private-search-engines-dedup-test.db");
+        }
+        let _ = std::fs::remove_file("/tmp/private-search-engines-dedup-test.db");
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = CountingEngine {
+            calls: calls.clone(),
+        };
+
+        let (a, b) = tokio::join!(
+            fetch_or_cache_result(engine.clone(), "dedup race".to_string(), 0, 5),
+            fetch_or_cache_result(engine.clone(), "dedup race".to_string(), 0, 5),
+        );
+
+        assert_eq!(a.unwrap().len(), 5);
+        assert_eq!(b.unwrap().len(), 5);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "two concurrent identical searches should only hit the engine once"
+        );
+
+        let _ = std::fs::remove_file("/tmp/private-search-engines-dedup-test.db");
+    }
 
     /// End-to-end proof that pagination works through the full cache + builder
     /// pipeline: page 2 disjoint from page 1, page 1 revisited from cache.

@@ -53,7 +53,7 @@ function stopPolling() {
 }
 
 function unwrapPayload(obj) {
-  const empty = { results: [], engines: [] };
+  const empty = { results: [], engines: [], hasMore: false };
   if (!obj || typeof obj !== "object") return empty;
 
   const payload = obj.General || obj.Images;
@@ -62,7 +62,11 @@ function unwrapPayload(obj) {
     return empty;
   }
 
-  return { results: payload.results || [], engines: payload.engines || [] };
+  return {
+    results: payload.results || [],
+    engines: payload.engines || [],
+    hasMore: !!payload.hasMore,
+  };
 }
 
 function escapeHtml(str) {
@@ -134,7 +138,7 @@ async function pollResults(query) {
       return;
     }
 
-    const { results, engines } = unwrapPayload(data);
+    const { results, engines, hasMore } = unwrapPayload(data);
 
     renderEngineStatus(engines);
 
@@ -144,7 +148,7 @@ async function pollResults(query) {
       renderSearchResults(results);
     }
 
-    if (data.hasMore) {
+    if (hasMore) {
       setTimeout(() => pollResults(query), POLL_INTERVAL);
     } else {
       stopPolling();

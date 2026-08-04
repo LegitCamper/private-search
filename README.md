@@ -4,11 +4,6 @@ A self-hostable private search.
 
 No tracking. FAST AF (I think). Run it yourself.
 
-
-Search requests and caching are handled by the backend library:
-
-- **https://github.com/legitcamper/private-search-engines**
-
 ## Quick Start (Docker)
 
 You can deploy your own instance using Docker with a single command:
