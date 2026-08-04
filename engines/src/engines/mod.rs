@@ -47,16 +47,37 @@ pub trait ImageEngine: EngineInfo + Clone + Send {
     ) -> Result<Vec<ImagesRow>, EngineError>;
 }
 
-fn new_rand_client() -> Result<Client, reqwest::Error> {
-    static USER_AGENTS: &[&str] = &[
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64; rv:118.0) Gecko/20100101 Firefox/118.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.72 Safari/537.36",
-    ];
+static USER_AGENTS: &[&str] = &[
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:118.0) Gecko/20100101 Firefox/118.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.72 Safari/537.36",
+];
 
-    let user_agent = USER_AGENTS.choose(&mut rand::rng()).unwrap();
+/// One [`Client`] per user agent, built once and reused so requests actually
+/// benefit from connection pooling/keep-alive instead of paying a fresh
+/// TCP+TLS handshake on every single search. Cloning a `Client` is cheap —
+/// it's just an `Arc` around the shared connection pool.
+static CLIENTS: std::sync::OnceLock<Vec<Client>> = std::sync::OnceLock::new();
 
-    Client::builder().user_agent(*user_agent).build()
+/// Picks a random pre-built client (rotating user agent across requests to
+/// avoid looking like a single scripted client to the upstream engine).
+fn new_rand_client() -> Client {
+    let clients = CLIENTS.get_or_init(|| {
+        USER_AGENTS
+            .iter()
+            .map(|ua| {
+                Client::builder()
+                    .user_agent(*ua)
+                    .build()
+                    .expect("failed to build reqwest client")
+            })
+            .collect()
+    });
+
+    clients
+        .choose(&mut rand::rng())
+        .expect("USER_AGENTS is non-empty")
+        .clone()
 }
 
 /// Record-once, replay-forever HTML fixtures for the "live" engine tests: the
@@ -95,7 +116,6 @@ pub(crate) mod fixtures {
         }
 
         let html = super::new_rand_client()
-            .expect("failed to build http client")
             .get(url)
             .send()
             .await

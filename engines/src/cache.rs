@@ -1,22 +1,42 @@
 use serde::Serialize;
-use sqlx::{SqlitePool, prelude::FromRow};
-use std::env;
+use sqlx::{
+    SqlitePool,
+    prelude::FromRow,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+};
+use std::{env, str::FromStr, time::Duration};
 
 const DEFAULT_SQLITE_DB_NAME: &str = "data/cache.db";
 const SQLITE_DB_ENV: &str = "CACHE_DB_PATH";
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn init() -> Result<SqlitePool, sqlx::Error> {
     let db_path = env::var(SQLITE_DB_ENV).unwrap_or_else(|_| DEFAULT_SQLITE_DB_NAME.to_string());
 
-    // `mode=rwc` lets SQLite create the db file itself, but not missing parent
-    // dirs — create those so a fresh checkout/CWD doesn't fail to open.
+    // Missing parent dirs (but not the db file itself — `create_if_missing`
+    // below handles that) would fail to open on a fresh checkout/CWD.
     if let Some(parent) = std::path::Path::new(&db_path).parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).expect("failed to create cache db directory");
     }
 
-    let url = format!("sqlite://{}?mode=rwc", db_path);
+    let options = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}"))
+        .expect("invalid CACHE_DB_PATH")
+        .create_if_missing(true)
+        // Readers don't block the writer (and vice versa) under WAL, which
+        // matters once more than one request is touching the cache at once —
+        // the default rollback-journal mode serializes all writers on the
+        // whole file and readily surfaces as "database is locked".
+        .journal_mode(SqliteJournalMode::Wal)
+        // SQLite ignores `ON DELETE CASCADE` unless this is set per-connection;
+        // cache cleanup relies on it to drop query_results/query_images rows
+        // when their parent `queries` row is purged.
+        .foreign_keys(true)
+        // Belt-and-suspenders alongside WAL: if two connections still do
+        // contend, wait instead of immediately erroring out.
+        .busy_timeout(BUSY_TIMEOUT);
 
-    let conn = SqlitePool::connect(&url)
+    let conn = SqlitePoolOptions::new()
+        .connect_with(options)
         .await
         .expect("FAILED TO CONNECT TO DB");
 
@@ -79,6 +99,36 @@ async fn create_search_cache(conn: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
 
     Ok(())
+}
+
+/// Deletes cached queries older than `cutoff` (cascade-dropping their
+/// `query_results`/`query_images` junction rows via the `ON DELETE CASCADE`
+/// foreign keys — relies on `PRAGMA foreign_keys = ON`, set in [`init`]),
+/// then sweeps `results`/`images` rows that are no longer referenced by any
+/// remaining query. Returns the number of queries purged.
+pub async fn purge_stale_queries(
+    pool: &SqlitePool,
+    cutoff: chrono::NaiveDateTime,
+) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let purged = sqlx::query("DELETE FROM queries WHERE fetched_at < ?")
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    sqlx::query("DELETE FROM results WHERE id NOT IN (SELECT result_id FROM query_results)")
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("DELETE FROM images WHERE id NOT IN (SELECT image_id FROM query_images)")
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    Ok(purged)
 }
 
 /// Atomically get-or-create the query row and insert `entries` for it.
@@ -400,13 +450,20 @@ mod test {
     use crate::cache::{
         ImagesRow, ResultRow, create_search_cache, get_engine_id, get_image_for_query,
         get_images_for_query, get_results_for_query, insert_image, insert_query,
-        insert_query_image, upsert_query_with_images, upsert_query_with_results,
+        insert_query_image, purge_stale_queries, upsert_query_with_images,
+        upsert_query_with_results,
     };
     use chrono::Utc;
     use sqlx::SqlitePool;
+    use std::str::FromStr;
 
     async fn new_db() -> SqlitePool {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        // `foreign_keys(true)` matches production (set in `init`) — needed
+        // here too since `purge_stale_queries`'s cascade delete depends on it.
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
 
         create_search_cache(&pool).await.unwrap();
 
@@ -678,5 +735,64 @@ mod test {
         assert_eq!(imgs[0].title, "A");
         assert_eq!(imgs[1].title, "B");
         assert_eq!(imgs[2].title, "C");
+    }
+
+    #[sqlx::test]
+    async fn test_purge_stale_queries_removes_old_and_keeps_fresh() {
+        let pool = new_db().await;
+
+        let old_fetched_at = Utc::now().naive_utc() - chrono::Duration::days(30);
+        let fresh_fetched_at = Utc::now().naive_utc();
+
+        let old_query_id = upsert_query_with_results(
+            &pool,
+            "Brave",
+            "stale query",
+            sample_results(),
+            old_fetched_at,
+        )
+        .await
+        .unwrap();
+
+        let fresh_query_id = upsert_query_with_results(
+            &pool,
+            "Brave",
+            "fresh query",
+            vec![ResultRow {
+                url: "https://keep-me.com".into(),
+                title: "Keep me".into(),
+                description: "Still fresh".into(),
+            }],
+            fresh_fetched_at,
+        )
+        .await
+        .unwrap();
+
+        let cutoff = Utc::now().naive_utc() - chrono::Duration::days(7);
+        let purged = purge_stale_queries(&pool, cutoff).await.unwrap();
+        assert_eq!(purged, 1, "only the stale query should be purged");
+
+        // The stale query and its results are gone...
+        assert!(
+            get_results_for_query(&pool, old_query_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let orphan_check: Option<(i64,)> =
+            sqlx::query_as("SELECT id FROM results WHERE url = ?")
+                .bind("https://example.com")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(
+            orphan_check.is_none(),
+            "orphaned result rows should be swept after their query is purged"
+        );
+
+        // ...but the fresh query survives untouched.
+        let fresh = get_results_for_query(&pool, fresh_query_id).await.unwrap();
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].url, "https://keep-me.com");
     }
 }

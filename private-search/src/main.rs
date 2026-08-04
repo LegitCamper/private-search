@@ -1,7 +1,10 @@
+use std::time::Duration;
+
 use rocket::{
-    Request, Response,
+    Orbit, Request, Response, Rocket,
     fairing::{Fairing, Info, Kind},
     fs::FileServer,
+    http::Status,
     response::Redirect,
     serde::{Serialize, json::Json},
 };
@@ -11,6 +14,9 @@ use private_search_engines::{
     FetchError, ImageEngines, ImageResult, ImageSearchBuilder, SearchBuilder, SearchEngines,
     SearchResponse, SearchResult, init_db,
 };
+
+mod rate_limit;
+use rate_limit::{RateLimited, RateLimiter};
 
 #[macro_use]
 extern crate rocket;
@@ -25,6 +31,16 @@ fn resolve_dir(env_var: &str, manifest_relative_default: &str) -> String {
     std::env::var(env_var).unwrap_or_else(|_| manifest_relative_default.to_string())
 }
 
+/// Reads `env_var` as a `u64` seconds count, falling back to `default_secs`
+/// if unset or unparseable.
+fn resolve_secs(env_var: &str, default_secs: u64) -> Duration {
+    std::env::var(env_var)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(default_secs))
+}
+
 #[rocket::main]
 async fn main() -> Result<(), rocket::Error> {
     init_db().await;
@@ -35,19 +51,68 @@ async fn main() -> Result<(), rocket::Error> {
         concat!(env!("CARGO_MANIFEST_DIR"), "/templates"),
     );
 
+    let cache_clean_interval = resolve_secs("CACHE_CLEAN_INTERVAL_SECS", 60 * 60); // hourly
+    let cache_max_age = resolve_secs("CACHE_MAX_AGE_SECS", 7 * 24 * 60 * 60); // 7 days
+
     let figment = rocket::Config::figment().merge(("template_dir", template_dir));
 
     let _rocket = rocket::custom(figment)
         .attach(Template::fairing())
         .attach(CacheFairing)
+        .attach(CacheCleanupFairing {
+            interval: cache_clean_interval,
+            max_age: cache_max_age,
+        })
+        .manage(RateLimiter::default())
         .mount("/static", FileServer::from(static_dir))
-        .mount("/", routes![index, empty_search, search, query])
+        .mount("/", routes![index, empty_search, search, query, health])
         .ignite()
         .await?
         .launch()
         .await?;
 
     Ok(())
+}
+
+/// Periodically purges stale cache entries (see
+/// [`private_search_engines::clean_cache`]) so the SQLite cache doesn't grow
+/// forever. Runs as an `on_liftoff` fairing rather than being spawned
+/// straight from `main` so it starts only once Rocket (and its logger) is
+/// actually up.
+struct CacheCleanupFairing {
+    interval: Duration,
+    max_age: Duration,
+}
+
+#[rocket::async_trait]
+impl Fairing for CacheCleanupFairing {
+    fn info(&self) -> Info {
+        Info {
+            name: "Cache cleanup scheduler",
+            kind: Kind::Liftoff,
+        }
+    }
+
+    async fn on_liftoff(&self, _rocket: &Rocket<Orbit>) {
+        let interval = self.interval;
+        let max_age = self.max_age;
+
+        rocket::tokio::spawn(async move {
+            let mut ticker = rocket::tokio::time::interval(interval);
+            // `interval` fires immediately on its first tick; that's fine —
+            // it just means cleanup also runs once right at startup.
+            loop {
+                ticker.tick().await;
+                match private_search_engines::clean_cache(max_age).await {
+                    Ok(purged) if purged > 0 => {
+                        log::info!("cache cleanup: purged {purged} stale quer{}", if purged == 1 { "y" } else { "ies" });
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::error!("cache cleanup failed: {e}"),
+                }
+            }
+        });
+    }
 }
 
 pub struct CacheFairing;
@@ -89,6 +154,15 @@ fn empty_search() -> Redirect {
     Redirect::to("/")
 }
 
+/// Liveness/readiness probe target for container orchestration. Doesn't
+/// touch the DB or upstream engines — if the process can respond at all,
+/// it's up; readiness w.r.t. the cache DB is already covered by `init_db()`
+/// blocking startup in `main`.
+#[get("/health")]
+fn health() -> Status {
+    Status::Ok
+}
+
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
 pub struct TabFlags {
@@ -116,6 +190,7 @@ pub enum QueryResults {
 
 #[get("/query?<tab>&<query>&<start>&<count>")]
 async fn query(
+    _limit: RateLimited,
     tab: &str,
     query: &str,
     start: usize,
@@ -144,25 +219,25 @@ async fn query(
         _ => return Err("Unknown Tab query requested".into()),
     }
     .map_err(|e| {
-        match e {
-            FetchError::Sqlx(error) => {
-                eprint!("Sql Error: {}", error)
-            }
-            FetchError::Engine(error) => {
-                eprint!("Engine Error: {:?}", error)
-            }
-            FetchError::Timeouts => {
-                eprint!("Some Engines timed out")
-            }
+        match &e {
+            FetchError::Sqlx(error) => log::error!("cache db error: {error}"),
+            FetchError::Engine(error) => log::warn!("engine error: {error:?}"),
+            FetchError::Timeouts => log::warn!("query timed out: tab={tab} query={query:?}"),
             FetchError::AllEnginesFailed => {
-                eprint!("All Engines Failed")
+                log::error!("all engines failed: tab={tab} query={query:?}")
             }
         }
         "Query Error".to_string()
     })?;
 
-    #[cfg(debug_assertions)]
-    println!("res: {:?}", results);
+    log::debug!("query ok: tab={tab} query={query:?} results={}", results_len(&results));
 
     Ok(Json(results))
+}
+
+fn results_len(results: &QueryResults) -> usize {
+    match results {
+        QueryResults::General(r) => r.results.len(),
+        QueryResults::Images(r) => r.results.len(),
+    }
 }

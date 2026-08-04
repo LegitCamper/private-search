@@ -1978,6 +1978,7 @@ name = "private-search"
 version = "0.1.0"
 dependencies = [
  "lazy_static",
+ "log",
  "private-search-engines",
  "rocket",
  "rocket_dyn_templates",
@@ -1990,6 +1991,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "log",
  "percent-encoding",
  "rand 0.9.2",
  "regex",

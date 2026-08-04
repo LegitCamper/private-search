@@ -32,7 +32,20 @@ RUN --mount=type=cache,target=/build/target \
     objcopy --compress-debug-sections target/sonic/x86_64-unknown-linux-gnu/release/private-search ./main
 
 
-FROM docker.io/rust:1-slim-bookworm AS runtime
+FROM docker.io/debian:bookworm-slim AS runtime
+
+# Only what the binary actually links/needs at runtime (verified via `ldd`):
+# libssl3/ca-certificates for outbound HTTPS to the search engines, the rest
+# for reqwest's response decompression. SQLite is statically linked in
+# (sqlx's "bundled" feature) so no libsqlite3 package is needed here.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    zlib1g \
+    libbrotli1 \
+    libzstd1 && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

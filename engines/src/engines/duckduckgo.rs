@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use percent_encoding::percent_decode;
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode, utf8_percent_encode};
 use reqwest::Url;
 
 use crate::engines::{
@@ -18,7 +18,8 @@ impl EngineInfo for DuckDuckGo {
 // `s`/`dc` mirror DDG's own "More results" link params; unofficial, may need
 // revalidating against `test_duckduckgo_pagination_live` if DDG's markup changes.
 fn build_search_url(query: &str, start: usize) -> String {
-    let mut url = format!("https://html.duckduckgo.com/html?q={}", query);
+    let query = utf8_percent_encode(query, NON_ALPHANUMERIC);
+    let mut url = format!("https://html.duckduckgo.com/html?q={query}");
     if start > 0 {
         url.push_str(&format!("&s={start}&dc={}", start + 1));
     }
@@ -42,7 +43,6 @@ impl SearchEngine for DuckDuckGo {
         _count: usize,
     ) -> Result<Vec<ResultRow>, EngineError> {
         let resp = new_rand_client()
-            .map_err(EngineError::ReqwestError)?
             .get(build_search_url(query, start))
             .send()
             .await
@@ -106,7 +106,7 @@ mod test {
     fn build_search_url_omits_pagination_params_on_first_page() {
         assert_eq!(
             build_search_url("rust async", 0),
-            "https://html.duckduckgo.com/html?q=rust async"
+            "https://html.duckduckgo.com/html?q=rust%20async"
         );
     }
 
@@ -114,7 +114,15 @@ mod test {
     fn build_search_url_adds_start_and_dc_for_later_pages() {
         assert_eq!(
             build_search_url("rust async", 20),
-            "https://html.duckduckgo.com/html?q=rust async&s=20&dc=21"
+            "https://html.duckduckgo.com/html?q=rust%20async&s=20&dc=21"
+        );
+    }
+
+    #[test]
+    fn build_search_url_encodes_reserved_characters() {
+        assert_eq!(
+            build_search_url("AT&T c++ #tag", 0),
+            "https://html.duckduckgo.com/html?q=AT%26T%20c%2B%2B%20%23tag"
         );
     }
 

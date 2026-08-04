@@ -89,6 +89,19 @@ pub async fn init_db() {
     get_db().await;
 }
 
+/// Purges cached queries (and their now-orphaned results/images) older than
+/// `max_age`. Returns the number of queries purged.
+///
+/// This crate never calls this on its own — callers (e.g. the `private-search`
+/// binary) are expected to schedule it periodically, since only they know
+/// what cadence/retention makes sense for their deployment.
+pub async fn clean_cache(max_age: Duration) -> Result<u64, FetchError> {
+    let pool = get_db().await;
+    let max_age = chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::MAX);
+    let cutoff = chrono::Utc::now().naive_utc() - max_age;
+    Ok(cache::purge_stale_queries(pool, cutoff).await?)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
     pub url: String,
@@ -227,14 +240,14 @@ async fn gather<T: Send + 'static>(
                 });
             }
             Ok(Err(e)) => {
-                eprintln!("Engine failed: {e}");
+                log::warn!("engine \"{name}\" failed: {e}");
                 reports.push(EngineReport {
                     engine: name.to_string(),
                     status: EngineStatus::Failed(e.to_string()),
                 });
             }
             Err(_) => {
-                eprintln!("Engine timed out");
+                log::warn!("engine \"{name}\" timed out");
                 reports.push(EngineReport {
                     engine: name.to_string(),
                     status: EngineStatus::TimedOut,

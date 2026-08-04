@@ -6,6 +6,7 @@ use crate::{
     },
 };
 use async_trait::async_trait;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
 #[derive(Clone)]
 pub struct Brave;
@@ -22,11 +23,17 @@ const BRAVE_RESULTS_PER_PAGE: usize = 20;
 
 fn build_search_url(query: &str, start: usize) -> String {
     let page = start / BRAVE_RESULTS_PER_PAGE;
-    let mut url = format!("https://search.brave.com/search?q={}", query);
+    let query = utf8_percent_encode(query, NON_ALPHANUMERIC);
+    let mut url = format!("https://search.brave.com/search?q={query}");
     if page > 0 {
         url.push_str(&format!("&offset={page}"));
     }
     url
+}
+
+fn build_image_search_url(query: &str) -> String {
+    let query = utf8_percent_encode(query, NON_ALPHANUMERIC);
+    format!("https://search.brave.com/images?q={query}")
 }
 
 // A real Brave results page always has this container, even with 0 hits;
@@ -49,7 +56,6 @@ impl SearchEngine for Brave {
         _count: usize,
     ) -> Result<Vec<ResultRow>, EngineError> {
         let resp = new_rand_client()
-            .map_err(EngineError::ReqwestError)?
             .get(build_search_url(query, start))
             .send()
             .await
@@ -88,8 +94,7 @@ impl ImageEngine for Brave {
         _count: usize,
     ) -> Result<Vec<ImagesRow>, EngineError> {
         let resp = new_rand_client()
-            .map_err(EngineError::ReqwestError)?
-            .get(format!("https://search.brave.com/images?q={}", query))
+            .get(build_image_search_url(query))
             .send()
             .await
             .map_err(EngineError::ReqwestError)?;
@@ -122,11 +127,11 @@ mod test {
     fn build_search_url_omits_offset_on_first_page() {
         assert_eq!(
             build_search_url("rust async", 0),
-            "https://search.brave.com/search?q=rust async"
+            "https://search.brave.com/search?q=rust%20async"
         );
         assert_eq!(
             build_search_url("rust async", BRAVE_RESULTS_PER_PAGE - 1),
-            "https://search.brave.com/search?q=rust async"
+            "https://search.brave.com/search?q=rust%20async"
         );
     }
 
@@ -134,11 +139,19 @@ mod test {
     fn build_search_url_adds_offset_for_later_pages() {
         assert_eq!(
             build_search_url("rust async", BRAVE_RESULTS_PER_PAGE),
-            "https://search.brave.com/search?q=rust async&offset=1"
+            "https://search.brave.com/search?q=rust%20async&offset=1"
         );
         assert_eq!(
             build_search_url("rust async", BRAVE_RESULTS_PER_PAGE * 2 + 5),
-            "https://search.brave.com/search?q=rust async&offset=2"
+            "https://search.brave.com/search?q=rust%20async&offset=2"
+        );
+    }
+
+    #[test]
+    fn build_search_url_encodes_reserved_characters() {
+        assert_eq!(
+            build_search_url("AT&T c++ #tag", 0),
+            "https://search.brave.com/search?q=AT%26T%20c%2B%2B%20%23tag"
         );
     }
 
@@ -274,7 +287,7 @@ mod test {
     async fn test_brave_images_live() {
         let html = cached_html(
             "brave/images_p0.html",
-            "https://search.brave.com/images?q=rust async",
+            &build_image_search_url("rust async"),
             looks_like_image_results,
         )
         .await;

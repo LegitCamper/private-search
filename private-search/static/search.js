@@ -77,6 +77,21 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+// Result urls come from scraped, untrusted third-party HTML. Only allow
+// http(s) links (blocks `javascript:`/`data:` etc.) and escape the rest so
+// it's safe to drop into an href/src attribute.
+function safeUrl(url) {
+  try {
+    const parsed = new URL(String(url), location.href);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return escapeHtml(parsed.href);
+    }
+  } catch (e) {
+    // not a valid URL — fall through to blocking it
+  }
+  return "#";
+}
+
 function renderEngineStatus(engines) {
   const container = document.getElementById("engine-status");
   if (!container) return;
@@ -175,14 +190,15 @@ function renderSearchResults(results) {
     }
 
     const enginesHtml = result.engines
-      .map(e => `<span class="engine-tag">${e}</span>`)
+      .map(e => `<span class="engine-tag">${escapeHtml(e)}</span>`)
       .join(" ");
+    const href = safeUrl(result.url);
 
     // Fill content
     skeleton.innerHTML = `
-      <a class="url_header" target="_blank" rel="noopener noreferrer" href="${result.url}">${result.url}</a>
-      <h3><a class="name" target="_blank" rel="noopener noreferrer" href="${result.url}">${result.title}</a></h3>
-      <p class="description">${result.description}</p>
+      <a class="url_header" target="_blank" rel="noopener noreferrer" href="${href}">${escapeHtml(result.url)}</a>
+      <h3><a class="name" target="_blank" rel="noopener noreferrer" href="${href}">${escapeHtml(result.title)}</a></h3>
+      <p class="description">${escapeHtml(result.description)}</p>
       <div class="engines">
         ${enginesHtml}
         ${result.cached ? '<span class="engine-tag cached">Cached ✓</span>' : ''}
@@ -209,15 +225,17 @@ function renderImageResults(results) {
       container.appendChild(skeleton);
     }  
 
+    const href = safeUrl(result.url);
+
     skeleton.innerHTML = `
-      <a href="${result.url}" target="_blank" rel="noopener">
-        <img src="${result.url}" class="image-thumb" alt="">
+      <a href="${href}" target="_blank" rel="noopener">
+        <img src="${href}" class="image-thumb" alt="">
       </a>
 
       <figcaption>
-        <div class="image-title">${result.title || ""}</div>
+        <div class="image-title">${escapeHtml(result.title || "")}</div>
         <div class="engines">
-          ${result.engines.map(e => `<span class="engine-tag">${e}</span>`).join(" ")}
+          ${result.engines.map(e => `<span class="engine-tag">${escapeHtml(e)}</span>`).join(" ")}
           ${result.cached ? '<span class="engine-tag cached">Cached ✓</span>' : ''}
         </div>
       </figcaption>
