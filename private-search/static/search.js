@@ -17,6 +17,7 @@ let polling = false;
 let batchLoading = false; // prevents multiple skeleton triggers
 let currentTab = "general";
 let consecutiveFailures = 0;
+let hasMoreResults = true; // server said there could be another page; only fetch it once the user scrolls for it
 
 const searchSkeletons = new SkeletonQueue();
 const imageSkeletons = new SkeletonQueue();
@@ -172,8 +173,14 @@ async function pollResults(query) {
       renderSearchResults(results);
     }
 
+    // Only fetch this page — the next one is loaded when the user scrolls
+    // for it (see the `scroll` listener below), not automatically. Without
+    // this, a single search would recursively page through the *entire*
+    // result set every `POLL_INTERVAL`, hammering the upstream engines with
+    // requests no one asked for.
+    hasMoreResults = hasMore;
     if (hasMore) {
-      setTimeout(() => pollResults(query), POLL_INTERVAL);
+      stopPolling();
     } else {
       finishSearch();
     }
@@ -309,7 +316,7 @@ window.addEventListener('scroll', () => {
   );
 
   if (scrollTop + windowHeight >= docHeight - 500) {
-    if (batchLoading) return; // already loading a batch
+    if (batchLoading || !hasMoreResults) return; // already loading a batch, or nothing left to fetch
 
     batchLoading = true; // mark that we are loading
 
