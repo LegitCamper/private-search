@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::SqlitePool;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
@@ -201,6 +201,11 @@ impl<R: CacheableRow> MergedCache<R> {
         }
 
         let mut engine_outcomes: Vec<(String, EngineOutcome)> = Vec::new();
+        // Sources that failed/timed out once this call are benched for the
+        // remaining rounds: hammering a struggling engine up to MAX_ROUNDS
+        // times back-to-back is exactly the traffic pattern that gets an IP
+        // bot-walled. They retry fresh on the next call instead.
+        let mut failed_this_call: HashSet<&'static str> = HashSet::new();
 
         for _round in 0..MAX_ROUNDS {
             if merged.len() >= needed_end {
@@ -209,7 +214,7 @@ impl<R: CacheableRow> MergedCache<R> {
 
             let needy: Vec<Arc<dyn EngineSource<R>>> = sources
                 .iter()
-                .filter(|s| !exhausted[s.name()])
+                .filter(|s| !exhausted[s.name()] && !failed_this_call.contains(s.name()))
                 .cloned()
                 .collect();
             if needy.is_empty() {
@@ -256,10 +261,12 @@ impl<R: CacheableRow> MergedCache<R> {
                     }
                     Ok(Err(e)) => {
                         log::warn!("source \"{name}\" failed: {e}");
+                        failed_this_call.insert(name);
                         engine_outcomes.push((name.to_string(), EngineOutcome::Failed(e)));
                     }
                     Err(_) => {
                         log::warn!("source \"{name}\" timed out");
+                        failed_this_call.insert(name);
                         engine_outcomes.push((name.to_string(), EngineOutcome::TimedOut));
                     }
                 }

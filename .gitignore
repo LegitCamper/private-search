@@ -6,3 +6,4 @@ cache.db-shm
 data/
 /main
 node_modules/
+/search-engines/tests/fixtures/brave

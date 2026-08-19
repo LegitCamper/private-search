@@ -33,11 +33,13 @@ fn build_image_search_url(query: &str) -> String {
     format!("https://search.brave.com/images?q={query}")
 }
 
-// A real Brave results page always has this container, even with 0 hits;
-// only a block/captcha interstitial omits it. Without this check a block
-// silently parses to an empty Vec, indistinguishable from genuine exhaustion.
+// A real Brave results page always has the SvelteKit app shell's
+// `id="search-page"` container, even with 0 hits; only a block/captcha
+// interstitial omits it. Without this check a block silently parses to an
+// empty Vec, indistinguishable from genuine exhaustion. (Brave's pre-2026
+// markup used `id="results"`; the SvelteKit redesign dropped it.)
 fn looks_like_search_results(html: &str) -> bool {
-    html.contains(r#"id="results""#)
+    html.contains(r#"id="search-page""#)
 }
 
 fn looks_like_image_results(html: &str) -> bool {
@@ -70,9 +72,13 @@ impl SearchEngine for Brave {
 }
 
 pub fn parse_search_response(html: &str) -> Result<Vec<RawResult>, EngineError> {
+    // Brave's SvelteKit page tags every snippet with a `data-type`; organic
+    // web hits are `data-type="web"`, which also excludes `cluster`/news/
+    // video rollup blocks (the old markup's `#results` wrapper and
+    // `.standalone` class are gone).
     Ok(parse_search(
         html,
-        "#results > .snippet[data-pos]:not(.standalone)",
+        r#".snippet[data-pos][data-type="web"]"#,
         ".title",
         "a",
         ".generic-snippet, .video-snippet > .snippet-description",
@@ -165,7 +171,9 @@ mod test {
 
     #[test]
     fn looks_like_search_results_rejects_a_block_page() {
-        assert!(looks_like_search_results(r#"<div id="results">...</div>"#));
+        assert!(looks_like_search_results(
+            r#"<div id="search-page">...</div>"#
+        ));
         assert!(!looks_like_search_results(
             "<html><body>please verify you're human</body></html>"
         ));
@@ -181,33 +189,37 @@ mod test {
         ));
     }
 
+    // Mirrors Brave's SvelteKit markup (confirmed against a live fetch):
+    // snippets are tagged with `data-type`, and only `data-type="web"` rows
+    // are organic results — `cluster` (and news/video rollups) share the
+    // same `.snippet` class but must be excluded.
     const SEARCH_FIXTURE: &str = r#"
-        <div id="results">
-            <div class="snippet" data-pos="1">
+        <div id="search-page">
+            <div class="snippet svelte-x" data-pos="1" data-type="web">
                 <a href="https://example.com/rust">
-                    <div class="title">Rust Programming Language</div>
+                    <div class="title search-snippet-title">Rust Programming Language</div>
                 </a>
                 <div class="generic-snippet">A systems language for reliable software.</div>
             </div>
-            <div class="snippet" data-pos="2">
+            <div class="snippet svelte-x" data-pos="2" data-type="web">
                 <a href="https://example.com/video">
-                    <div class="title">Rust in 100 seconds</div>
+                    <div class="title search-snippet-title">Rust in 100 seconds</div>
                 </a>
                 <div class="video-snippet">
                     <div class="snippet-description">A quick video overview.</div>
                 </div>
             </div>
-            <div class="snippet standalone" data-pos="3">
+            <div class="snippet svelte-x" data-pos="3" data-type="cluster">
                 <a href="https://example.com/ignored">
                     <div class="title">Should be excluded</div>
                 </a>
-                <div class="generic-snippet">Standalone snippets aren't real results.</div>
+                <div class="generic-snippet">Cluster rollups aren't organic results.</div>
             </div>
         </div>
     "#;
 
     #[test]
-    fn parse_search_response_extracts_results_and_skips_standalone() {
+    fn parse_search_response_extracts_results_and_skips_non_web_snippets() {
         let results = parse_search_response(SEARCH_FIXTURE).unwrap();
 
         assert_eq!(results.len(), 2);
