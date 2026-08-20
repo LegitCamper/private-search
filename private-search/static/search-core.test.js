@@ -5,6 +5,8 @@ import {
   safeUrl,
   unwrapPayload,
   getQueryParam,
+  skeletonsNeeded,
+  canLoadNextPage,
   SkeletonQueue,
 } from "./search-core.js";
 
@@ -86,6 +88,32 @@ test("getQueryParam reads a param from a location.search-shaped string", () => {
 test("getQueryParam defaults to an empty string when absent", () => {
   assert.equal(getQueryParam("?t=general", "q"), "");
   assert.equal(getQueryParam("", "q"), "");
+});
+
+test("skeletonsNeeded caps outstanding placeholders at one page", () => {
+  assert.equal(skeletonsNeeded(0, 10), 10);
+  assert.equal(skeletonsNeeded(4, 10), 6);
+  assert.equal(skeletonsNeeded(10, 10), 0);
+  assert.equal(skeletonsNeeded(14, 10), 0);
+});
+
+test("canLoadNextPage blocks scroll loads while any request is active", () => {
+  assert.equal(
+    canLoadNextPage({ batchLoading: false, polling: true, hasMoreResults: true }),
+    false,
+  );
+  assert.equal(
+    canLoadNextPage({ batchLoading: true, polling: false, hasMoreResults: true }),
+    false,
+  );
+  assert.equal(
+    canLoadNextPage({ batchLoading: false, polling: false, hasMoreResults: false }),
+    false,
+  );
+  assert.equal(
+    canLoadNextPage({ batchLoading: false, polling: false, hasMoreResults: true }),
+    true,
+  );
 });
 
 test("SkeletonQueue serves pushed items before falling back to creating new ones", () => {

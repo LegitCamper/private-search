@@ -50,6 +50,17 @@ export function getQueryParam(search, name) {
   return new URLSearchParams(search).get(name) || "";
 }
 
+// Keep at most one page of unfilled placeholders in the document. A partial
+// response can leave some skeletons queued; the next request should top that
+// page back up instead of appending another complete page beneath it.
+export function skeletonsNeeded(queueLength, pageSize) {
+  return Math.max(0, pageSize - queueLength);
+}
+
+export function canLoadNextPage({ batchLoading, polling, hasMoreResults }) {
+  return !batchLoading && !polling && hasMoreResults;
+}
+
 // A small FIFO of not-yet-filled placeholder elements. Replaces matching
 // results to skeletons by a computed numeric id (which could drift out of
 // sync whenever a poll returns a different number of results than were

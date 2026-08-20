@@ -3,10 +3,11 @@ import {
   safeUrl,
   unwrapPayload,
   getQueryParam,
+  skeletonsNeeded,
+  canLoadNextPage,
   SkeletonQueue,
 } from "./search-core.js";
 
-const POLL_INTERVAL = 500;
 const numSearchSkels = 10;
 const numImageSkels = 50;
 
@@ -177,7 +178,7 @@ async function pollResults(query) {
     // Only fetch this page — the next one is loaded when the user scrolls
     // for it (see the `scroll` listener below), not automatically. Without
     // this, a single search would recursively page through the *entire*
-    // result set every `POLL_INTERVAL`, hammering the upstream engines with
+    // result set, hammering the upstream engines with
     // requests no one asked for.
     hasMoreResults = hasMore;
     if (hasMore) {
@@ -317,23 +318,23 @@ window.addEventListener('scroll', () => {
   );
 
   if (scrollTop + windowHeight >= docHeight - 500) {
-    if (batchLoading || !hasMoreResults) return; // already loading a batch, or nothing left to fetch
+    // `polling` covers the initial request and retries as well as scroll-
+    // initiated requests. Do not append placeholders while any of those is
+    // still active: a slow initial response used to let every scroll event
+    // add another page of skeletons.
+    if (!canLoadNextPage({ batchLoading, polling, hasMoreResults })) return;
 
     batchLoading = true; // mark that we are loading
 
     if (currentTab === "images") {
-        createImageSkeletons(numImageSkels);
+      createImageSkeletons(skeletonsNeeded(imageSkeletons.length, numImageSkels));
     } else {
-        createSearchSkeletons(numSearchSkels);
+      createSearchSkeletons(skeletonsNeeded(searchSkeletons.length, numSearchSkels));
     }
 
-    if (!polling) {
-      startPolling(get_query()).finally(() => {
-        batchLoading = false; // ready for next scroll batch
-      });
-    } else {
-      setTimeout(() => batchLoading = false, POLL_INTERVAL);
-    }
+    startPolling(get_query()).finally(() => {
+      batchLoading = false; // ready for next scroll batch
+    });
   }
 });
 
