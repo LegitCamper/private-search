@@ -6,4 +6,5 @@ cache.db-shm
 data/
 /main
 node_modules/
-/search-engines/tests/fixtures/brave
+# Engine HTML fixtures are committed deliberately so CI can detect upstream
+# markup changes (e.g. a redesigned results page) without hitting the network.

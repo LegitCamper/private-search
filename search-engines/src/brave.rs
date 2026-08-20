@@ -114,9 +114,14 @@ impl ImageEngine for Brave {
 }
 
 pub fn parse_image_response(html: &str) -> Result<Vec<RawImage>, EngineError> {
+    // Brave mixes a non-image "Find elsewhere" navigation card into the same
+    // `.image-result` class as real image tiles. That card has no `<img>`,
+    // so including it produces a broken entry with an empty `url` and
+    // `title` in every live Brave image search — exclude it by its second
+    // class instead.
     Ok(parse_images(
         html,
-        ".image-result",
+        ".image-result:not(.image-result-search-elsewhere)",
         ".image-metadata-title",
         "img",
     ))
@@ -262,6 +267,87 @@ mod test {
         assert_eq!(images[0].title, "Rust Logo");
         assert_eq!(images[1].url, "https://imgs.example.com/ferris.png");
         assert_eq!(images[1].title, "Ferris the Crab");
+    }
+
+    // These pin the parsers against real Brave markup captured on
+    // 2026-08-19 (`tests/fixtures/brave/`), so the next upstream redesign
+    // fails CI with a loud assertion instead of silently returning zero
+    // results to users, the way the SvelteKit rewrite did. Fixtures are read
+    // straight off disk (not through `fixtures::cached_html`), so a missing
+    // file fails the test instead of quietly falling back to a live fetch.
+    fn read_brave_fixture(relative: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(relative);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("missing fixture {relative}: {e}"))
+    }
+
+    #[test]
+    fn looks_like_search_results_accepts_the_real_brave_fixture() {
+        let html = read_brave_fixture("brave/search_p0.html");
+        assert!(looks_like_search_results(&html));
+    }
+
+    #[test]
+    fn parse_search_response_returns_twenty_results_from_the_real_fixture() {
+        let html = read_brave_fixture("brave/search_p0.html");
+        let results = parse_search_response(&html).unwrap();
+        assert_eq!(results.len(), 20);
+    }
+
+    #[test]
+    fn parse_search_response_extracts_non_empty_fields_from_the_real_fixture() {
+        let html = read_brave_fixture("brave/search_p0.html");
+        let results = parse_search_response(&html).unwrap();
+        assert!(
+            results
+                .iter()
+                .all(|r| !r.url.is_empty() && !r.title.is_empty()),
+            "a selector that matches containers but extracts nothing would \
+             leave url/title empty — the exact failure mode that made Brave \
+             return empty strings"
+        );
+    }
+
+    #[test]
+    fn parse_search_response_first_result_matches_the_real_fixture() {
+        let html = read_brave_fixture("brave/search_p0.html");
+        let results = parse_search_response(&html).unwrap();
+        assert_eq!(results[0].url, "https://rust-lang.github.io/async-book/");
+        assert_eq!(
+            results[0].title,
+            "Introduction - Asynchronous Programming in Rust"
+        );
+    }
+
+    #[test]
+    fn parse_search_response_page_two_does_not_repeat_page_one_on_the_real_fixtures() {
+        let page1 = parse_search_response(&read_brave_fixture("brave/search_p0.html")).unwrap();
+        let page2 = parse_search_response(&read_brave_fixture("brave/search_p1.html")).unwrap();
+
+        assert_eq!(page2.len(), 20);
+        assert!(
+            page2
+                .iter()
+                .all(|r2| !page1.iter().any(|r1| r1.url == r2.url)),
+            "pagination should advance, not repeat page 1's results"
+        );
+    }
+
+    #[test]
+    fn parse_image_response_returns_fifty_images_from_the_real_fixture() {
+        let html = read_brave_fixture("brave/images_p0.html");
+        assert!(looks_like_image_results(&html));
+
+        let images = parse_image_response(&html).unwrap();
+        assert_eq!(images.len(), 50);
+        assert!(
+            images
+                .iter()
+                .all(|i| !i.url.is_empty() && !i.title.is_empty()),
+            "a selector that matches Brave's non-image \"Find elsewhere\" \
+             filler card would leave url/title empty on that entry"
+        );
     }
 
     use crate::fixtures::cached_html;
