@@ -243,19 +243,33 @@ impl<R: CacheableRow> MergedCache<R> {
                 match outcome {
                     Ok(Ok(rows)) => {
                         let raw_count = rows.len();
+                        let mut new_count = 0;
                         for row in rows {
                             let url = row.url().to_string();
                             if let Some(&row_id) = existing_urls.get(&url) {
                                 attribute_existing.push((row_id, name.to_string()));
                             } else if let Some(&idx) = batch_index.get(&url) {
                                 fresh_batch[idx].1.push(name.to_string());
+                                new_count += 1;
                             } else {
                                 batch_index.insert(url, fresh_batch.len());
                                 fresh_batch.push((row, vec![name.to_string()]));
                                 any_new = true;
+                                new_count += 1;
                             }
                         }
-                        exhausted.insert(name, raw_count == 0);
+                        // A source that returns a full page containing nothing
+                        // the query didn't already know about is re-serving its
+                        // first page rather than advancing — Brave's image
+                        // endpoint is the concrete case, since its static page
+                        // ignores `start` entirely. Judging novelty against
+                        // `existing_urls` (rows known before this round) rather
+                        // than `batch_index` matters: two sources legitimately
+                        // returning the same fresh URL in one round must not
+                        // mark each other exhausted. Left unchecked, this
+                        // produces unbounded upstream requests and a
+                        // `has_more` that never goes false.
+                        exhausted.insert(name, raw_count == 0 || new_count == 0);
                         next_start.insert(name, next_start[name] + raw_count as i64);
                         engine_outcomes.push((name.to_string(), EngineOutcome::Ok));
                     }
@@ -424,6 +438,38 @@ mod test {
         }
     }
 
+    /// A source whose page is fixed regardless of `start`: every call
+    /// returns the identical rows. Models Brave's image endpoint, whose
+    /// static page can't be paginated and re-serves its first batch on
+    /// every request.
+    struct RepeatingSource {
+        name: &'static str,
+        page: Vec<TestRow>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RepeatingSource {
+        fn new(name: &'static str, page: Vec<TestRow>) -> Arc<Self> {
+            Arc::new(Self {
+                name,
+                page,
+                calls: Arc::new(AtomicUsize::new(0)),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl EngineSource<TestRow> for RepeatingSource {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        async fn fetch_page(&self, _query: &str, _start: usize) -> Result<Vec<TestRow>, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.page.clone())
+        }
+    }
+
     /// An isolated in-memory pool per test — deliberately avoids `db::init`'s
     /// env-var-based file path, since tests run concurrently in one process
     /// and a shared global env var races across threads (each test would
@@ -443,13 +489,17 @@ mod test {
         MergedCache::new(pool, "test", Arc::new(NoopRanker))
     }
 
-    fn sources(v: Vec<Arc<ScriptedSource>>) -> Vec<Arc<dyn EngineSource<TestRow>>> {
+    fn sources<S: EngineSource<TestRow> + 'static>(
+        v: Vec<Arc<S>>,
+    ) -> Vec<Arc<dyn EngineSource<TestRow>>> {
         v.into_iter()
             .map(|s| s as Arc<dyn EngineSource<TestRow>>)
             .collect()
     }
 
-    fn one_source(s: Arc<ScriptedSource>) -> Vec<Arc<dyn EngineSource<TestRow>>> {
+    fn one_source<S: EngineSource<TestRow> + 'static>(
+        s: Arc<S>,
+    ) -> Vec<Arc<dyn EngineSource<TestRow>>> {
         sources(vec![s])
     }
 
@@ -521,6 +571,58 @@ mod test {
         let urls2: Vec<_> = page2.rows.iter().map(|r| r.value.url.clone()).collect();
         assert!(urls1.iter().all(|u| !urls2.contains(u)));
         assert_eq!(urls2[0], "u5");
+    }
+
+    #[tokio::test]
+    async fn a_source_that_only_repeats_known_rows_is_marked_exhausted() {
+        let cache = test_cache().await;
+        let page = vec![row("a"), row("b"), row("c"), row("d"), row("e")];
+        let source = RepeatingSource::new("Repeater", page);
+        let calls = source.calls.clone();
+
+        cache
+            .get_or_extend(
+                "q",
+                &one_source(source.clone()),
+                0,
+                5,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+
+        // Simulate the frontend's "scroll for more" pattern: a later request
+        // asks for the next page.
+        let result = cache
+            .get_or_extend("q", &one_source(source), 5, 5, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert!(
+            !result.has_more,
+            "a source that only re-serves rows already known must be treated as exhausted"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) <= 2,
+            "an exhausted source must not keep being re-contacted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_is_not_exhausted_just_because_another_source_found_the_same_url() {
+        let cache = test_cache().await;
+        let a = ScriptedSource::new("A", vec![vec![row("x"), row("y")]]);
+        let b = ScriptedSource::new("B", vec![vec![row("x"), row("y")]]);
+
+        let result = cache
+            .get_or_extend("q", &sources(vec![a, b]), 0, 2, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert!(
+            result.has_more,
+            "overlapping fresh URLs within one round must not count as proof of exhaustion"
+        );
     }
 
     #[tokio::test]
