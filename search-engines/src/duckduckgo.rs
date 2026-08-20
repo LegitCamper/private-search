@@ -1,6 +1,12 @@
 use async_trait::async_trait;
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode, utf8_percent_encode};
+use percent_encoding::percent_decode;
 use reqwest::Url;
+use scraper::{Html, Selector};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 use crate::{
     BlockKind, EngineError, EngineInfo, RawResult, SearchEngine, body_or_block, browser_client,
@@ -10,21 +16,65 @@ use crate::{
 #[derive(Clone)]
 pub struct DuckDuckGo;
 
+const POST_URL: &str = "https://html.duckduckgo.com/html/";
+const VQD_TTL: Duration = Duration::from_secs(60 * 60);
+// Keep tokens in this bounded, process-local map because `search-engines` is
+// the pure adapter layer and must not depend on the project's SQLite cache.
+static VQD_CACHE: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+
 impl EngineInfo for DuckDuckGo {
     fn name(&self) -> &'static str {
         "DuckDuckGo"
     }
 }
 
-// `s`/`dc` mirror DDG's own "More results" link params; unofficial, may need
-// revalidating against `test_duckduckgo_pagination_live` if DDG's markup changes.
-fn build_search_url(query: &str, start: usize) -> String {
-    let query = utf8_percent_encode(query, NON_ALPHANUMERIC);
-    let mut url = format!("https://html.duckduckgo.com/html?q={query}");
-    if start > 0 {
-        url.push_str(&format!("&s={start}&dc={}", start + 1));
+fn extract_vqd(html: &str) -> Option<String> {
+    let document = Html::parse_document(html);
+    let selector = Selector::parse("input[name=\"vqd\"]").ok()?;
+    document
+        .select(&selector)
+        .next()
+        .and_then(|input| input.value().attr("value"))
+        .map(str::to_owned)
+}
+
+fn cached_vqd(query: &str) -> Option<String> {
+    let cache = VQD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().ok()?;
+    let now = Instant::now();
+    let (vqd, stored_at) = cache
+        .get_key_value(query)
+        .map(|(_, (vqd, stored_at))| (vqd.clone(), *stored_at))?;
+    if now.duration_since(stored_at) >= VQD_TTL {
+        cache.remove(query);
+        return None;
     }
-    url
+    Some(vqd)
+}
+
+fn store_vqd(query: &str, vqd: String) {
+    let cache = VQD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut cache) = cache.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    cache.retain(|_, (_, stored_at)| now.duration_since(*stored_at) < VQD_TTL);
+    cache.insert(query.to_owned(), (vqd, now));
+}
+
+fn build_form(query: &str, start: usize, vqd: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut form = vec![
+        ("q", query.to_owned()),
+        ("b", String::new()),
+        ("kl", "wt-wt".to_owned()),
+    ];
+    if start > 0 {
+        form.extend([("s", start.to_string()), ("dc", (start + 1).to_string())]);
+        if let Some(vqd) = vqd {
+            form.push(("vqd", vqd.to_owned()));
+        }
+    }
+    form
 }
 
 // A real DDG results page always has this wrapper, even with 0 hits; the
@@ -47,30 +97,61 @@ impl SearchEngine for DuckDuckGo {
         start: usize,
         _count: usize,
     ) -> Result<Vec<RawResult>, EngineError> {
-        let resp = browser_client()
-            .get(build_search_url(query, start))
-            .send()
-            .await
-            .map_err(EngineError::ReqwestError)?;
+        search_results_at(POST_URL, query, start).await
+    }
+}
 
-        let html = body_or_block(resp, "DuckDuckGo").await?;
-        if looks_like_captcha(&html) {
-            // DDG serves its challenge page with HTTP 202, so status alone
-            // cannot detect this bot wall.
+async fn search_results_at(
+    base_url: &str,
+    query: &str,
+    start: usize,
+) -> Result<Vec<RawResult>, EngineError> {
+    let vqd = if start > 0 {
+        let Some(vqd) = cached_vqd(query) else {
+            // DDG reads a paginated request without a `vqd` as bot traffic.
             return Err(EngineError::Blocked {
                 kind: BlockKind::Captcha,
                 retry_after: None,
-                detail: "DuckDuckGo challenge page".into(),
+                detail: "DuckDuckGo pagination requires a vqd token".into(),
             });
-        }
-        if !looks_like_search_results(&html) {
-            return Err(EngineError::ParseError(
-                "DuckDuckGo response markup may have changed; results marker was missing".into(),
-            ));
-        }
+        };
+        Some(vqd)
+    } else {
+        None
+    };
 
-        parse_response(&html)
+    let resp = browser_client()
+        .post(base_url)
+        .header(reqwest::header::REFERER, "https://html.duckduckgo.com/")
+        .form(&build_form(query, start, vqd.as_deref()))
+        .send()
+        .await
+        .map_err(EngineError::ReqwestError)?;
+
+    let html = body_or_block(resp, "DuckDuckGo").await?;
+    if looks_like_captcha(&html) {
+        // DDG serves its challenge page with HTTP 202, so status alone
+        // cannot detect this bot wall.
+        return Err(EngineError::Blocked {
+            kind: BlockKind::Captcha,
+            retry_after: None,
+            detail: "DuckDuckGo challenge page".into(),
+        });
     }
+    if !looks_like_search_results(&html) {
+        return Err(EngineError::ParseError(
+            "DuckDuckGo response markup may have changed; results marker was missing".into(),
+        ));
+    }
+    if start == 0
+        && let Some(vqd) = extract_vqd(&html)
+    {
+        // This adapter has no cache dependency: a process-local token is
+        // enough while keeping `search-engines` pure and cache-free.
+        store_vqd(query, vqd);
+    }
+
+    parse_response(&html)
 }
 
 pub fn parse_response(html: &str) -> Result<Vec<RawResult>, EngineError> {
@@ -115,38 +196,73 @@ mod test {
     use super::*;
 
     #[test]
-    fn build_search_url_omits_pagination_params_on_first_page() {
+    fn extract_vqd_reads_the_hidden_form_input() {
+        let html = r#"<input type="hidden" name="vqd" value="4-123abc">"#;
+
+        assert_eq!(extract_vqd(html), Some("4-123abc".to_owned()));
+    }
+
+    #[test]
+    fn extract_vqd_returns_none_when_absent() {
+        assert_eq!(extract_vqd(SEARCH_FIXTURE), None);
+    }
+
+    #[test]
+    fn a_stored_vqd_is_returned_for_the_same_query() {
+        let query = "vqd-cache-same-query-008";
+        store_vqd(query, "4-same-query".to_owned());
+
+        assert_eq!(cached_vqd(query), Some("4-same-query".to_owned()));
+    }
+
+    #[test]
+    fn a_vqd_for_a_different_query_is_not_returned() {
+        store_vqd("vqd-cache-source-query-008", "4-source-query".to_owned());
+
+        assert_eq!(cached_vqd("vqd-cache-different-query-008"), None);
+    }
+
+    #[test]
+    fn build_form_omits_pagination_fields_on_first_page() {
+        let form = build_form("rust async", 0, None);
+
         assert_eq!(
-            build_search_url("rust async", 0),
-            "https://html.duckduckgo.com/html?q=rust%20async"
+            form,
+            vec![
+                ("q", "rust async".to_owned()),
+                ("b", String::new()),
+                ("kl", "wt-wt".to_owned()),
+            ]
         );
     }
 
     #[test]
-    fn build_search_url_adds_start_and_dc_for_later_pages() {
+    fn build_form_adds_pagination_fields_for_later_pages() {
         assert_eq!(
-            build_search_url("rust async", 20),
-            "https://html.duckduckgo.com/html?q=rust%20async&s=20&dc=21"
+            build_form("rust async", 20, Some("4-123abc")),
+            vec![
+                ("q", "rust async".to_owned()),
+                ("b", String::new()),
+                ("kl", "wt-wt".to_owned()),
+                ("s", "20".to_owned()),
+                ("dc", "21".to_owned()),
+                ("vqd", "4-123abc".to_owned()),
+            ]
         );
     }
 
     #[test]
-    fn build_search_url_encodes_reserved_characters() {
-        assert_eq!(
-            build_search_url("AT&T c++ #tag", 0),
-            "https://html.duckduckgo.com/html?q=AT%26T%20c%2B%2B%20%23tag"
-        );
+    fn build_form_carries_reserved_characters_verbatim() {
+        let form = build_form("AT&T c++ #tag", 0, None);
+
+        assert_eq!(form[0], ("q", "AT&T c++ #tag".to_owned()));
     }
 
-    /// Non-ASCII queries must survive a full percent-encode round trip —
-    /// regression guard for "encoding support" (unicode search terms are a
-    /// normal, not edge-case, input for a search engine).
     #[test]
-    fn build_search_url_encodes_non_ascii_query() {
-        assert_eq!(
-            build_search_url("café 日本語", 0),
-            "https://html.duckduckgo.com/html?q=caf%C3%A9%20%E6%97%A5%E6%9C%AC%E8%AA%9E"
-        );
+    fn build_form_carries_non_ascii_query_verbatim() {
+        let form = build_form("café 日本語", 0, None);
+
+        assert_eq!(form[0], ("q", "café 日本語".to_owned()));
     }
 
     #[test]
@@ -209,41 +325,102 @@ mod test {
         assert_eq!(results[0].description, "A systems programming language.");
     }
 
-    use crate::fixtures::cached_html;
+    #[tokio::test]
+    async fn page_one_search_posts_form_and_referer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            let header_end = loop {
+                let bytes_read = stream.read(&mut chunk).await.unwrap();
+                assert!(bytes_read > 0, "request ended before its headers");
+                request.extend_from_slice(&chunk[..bytes_read]);
+                if let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    break header_end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length:")
+                        .or_else(|| line.strip_prefix("content-length:"))
+                })
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .expect("form POST should include Content-Length");
+            while request.len() - header_end < content_length {
+                let bytes_read = stream.read(&mut chunk).await.unwrap();
+                assert!(bytes_read > 0, "request ended before its form body");
+                request.extend_from_slice(&chunk[..bytes_read]);
+            }
+
+            let response_body = format!(
+                "<input type=\"hidden\" name=\"vqd\" value=\"4-localhost\">{SEARCH_FIXTURE}"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        search_results_at(&format!("http://{address}/"), "post shape 008", 0)
+            .await
+            .unwrap();
+
+        let request = server.await.unwrap();
+        let (head, body) = request.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("POST / HTTP/1.1"));
+        assert!(body.contains("q="));
+        assert!(body.contains("kl=wt-wt"));
+        assert!(head.to_ascii_lowercase().contains("referer:"));
+    }
+
+    #[tokio::test]
+    async fn paginating_without_a_vqd_refuses_to_send_a_request() {
+        let result = search_results_at("http://127.0.0.1:1/", "no-vqd-pagination-008", 20).await;
+
+        assert!(matches!(
+            result,
+            Err(EngineError::Blocked {
+                kind: BlockKind::Captcha,
+                ..
+            })
+        ));
+    }
 
     // DDG bot-walls datacenter IPs with an "anomaly" page; retry from a
-    // residential connection if the first-run fetch fails here.
+    // residential connection if a manually enabled live test fails here.
     #[ignore]
     #[tokio::test]
     async fn test_duckduckgo_live() {
-        let html = cached_html(
-            "duckduckgo/search_p0.html",
-            &build_search_url("rust async", 0),
-            looks_like_search_results,
-        )
-        .await;
-        let results = parse_response(&html).unwrap();
+        let results = DuckDuckGo
+            .search_results("rust async", 0, 20)
+            .await
+            .unwrap();
         assert!(!results.is_empty());
     }
 
     #[ignore]
     #[tokio::test]
     async fn test_duckduckgo_pagination_live() {
-        let page1_html = cached_html(
-            "duckduckgo/search_p0.html",
-            &build_search_url("rust async", 0),
-            looks_like_search_results,
-        )
-        .await;
-        let page2_html = cached_html(
-            "duckduckgo/search_p1.html",
-            &build_search_url("rust async", 20),
-            looks_like_search_results,
-        )
-        .await;
-
-        let page1 = parse_response(&page1_html).unwrap();
-        let page2 = parse_response(&page2_html).unwrap();
+        let page1 = DuckDuckGo
+            .search_results("rust async", 0, 20)
+            .await
+            .unwrap();
+        let page2 = DuckDuckGo
+            .search_results("rust async", 20, 20)
+            .await
+            .unwrap();
 
         assert!(!page1.is_empty());
         assert!(!page2.is_empty());
