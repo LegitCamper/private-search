@@ -8,3 +8,6 @@ data/
 node_modules/
 # Engine HTML fixtures are committed deliberately so CI can detect upstream
 # markup changes (e.g. a redesigned results page) without hitting the network.
+
+# Local agent worktrees are scratch state, not repository content.
+.claude/worktrees/
