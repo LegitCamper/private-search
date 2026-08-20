@@ -78,6 +78,7 @@ fn build_rocket() -> Rocket<Build> {
 }
 
 #[rocket::main]
+#[expect(clippy::result_large_err, reason = "signature is fixed by rocket")]
 async fn main() -> Result<(), rocket::Error> {
     init_db().await;
 
@@ -117,7 +118,10 @@ impl Fairing for CacheCleanupFairing {
                 ticker.tick().await;
                 match private_search_engines::clean_cache(max_age).await {
                     Ok(purged) if purged > 0 => {
-                        log::info!("cache cleanup: purged {purged} stale quer{}", if purged == 1 { "y" } else { "ies" });
+                        log::info!(
+                            "cache cleanup: purged {purged} stale quer{}",
+                            if purged == 1 { "y" } else { "ies" }
+                        );
                     }
                     Ok(_) => {}
                     Err(e) => log::error!("cache cleanup failed: {e}"),
@@ -265,7 +269,10 @@ async fn query(
         api_error(status, "query failed")
     })?;
 
-    log::debug!("query ok: tab={tab} query={query:?} results={}", results_len(&results));
+    log::debug!(
+        "query ok: tab={tab} query={query:?} results={}",
+        results_len(&results)
+    );
 
     Ok(Json(results))
 }

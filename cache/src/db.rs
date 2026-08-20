@@ -17,7 +17,10 @@ const SCHEMA_VERSION: i64 = 1;
 pub async fn init() -> Result<SqlitePool, sqlx::Error> {
     let db_path = env::var(SQLITE_DB_ENV).unwrap_or_else(|_| DEFAULT_SQLITE_DB_NAME.to_string());
 
-    if let Some(parent) = std::path::Path::new(&db_path).parent().filter(|p| !p.as_os_str().is_empty()) {
+    if let Some(parent) = std::path::Path::new(&db_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent).expect("failed to create cache db directory");
     }
 
@@ -346,12 +349,14 @@ pub(crate) async fn link_query_row(
     row_id: i64,
     merged_index: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT OR IGNORE INTO query_rows (query_id, row_id, merged_index) VALUES (?, ?, ?)")
-        .bind(query_id)
-        .bind(row_id)
-        .bind(merged_index)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO query_rows (query_id, row_id, merged_index) VALUES (?, ?, ?)",
+    )
+    .bind(query_id)
+    .bind(row_id)
+    .bind(merged_index)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 

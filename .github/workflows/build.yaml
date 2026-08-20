@@ -29,13 +29,29 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Cache cargo registry/target
         uses: Swatinem/rust-cache@v2
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
       # Live-network tests are `#[ignore]`d and skipped by default.
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run JS tests
+        run: node --test 'private-search/static/*.test.js'
 
   build-and-publish:
     needs: test

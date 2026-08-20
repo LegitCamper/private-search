@@ -297,6 +297,11 @@ impl<R: CacheableRow> MergedCache<R> {
                 .rank(query, fresh_batch.into_iter().map(|(r, _)| r).collect());
 
             let mut next_index = merged.len() as i64;
+            // The counter's start value comes from merged.len(), and the
+            // loop body pushes into merged on every iteration, so clippy's
+            // suggested `.zip()` rewrite would borrow merged both to build
+            // the range and to push into it. The manual counter is kept.
+            #[expect(clippy::explicit_counter_loop, reason = "zip() would re-borrow merged")]
             for row in ranked_rows {
                 let url = row.url().to_string();
                 let engines = engines_by_url.remove(&url).unwrap_or_default();
@@ -473,14 +478,18 @@ mod test {
     #[tokio::test]
     async fn cache_hit_pagination_never_recontacts_a_satisfied_source() {
         let cache = test_cache().await;
-        let source = ScriptedSource::new(
-            "A",
-            vec![(0..12).map(|i| row(&format!("u{i}"))).collect()],
-        );
+        let source =
+            ScriptedSource::new("A", vec![(0..12).map(|i| row(&format!("u{i}"))).collect()]);
         let calls = source.calls.clone();
 
         let page1 = cache
-            .get_or_extend("q", &one_source(source.clone()), 0, 5, Duration::from_secs(1))
+            .get_or_extend(
+                "q",
+                &one_source(source.clone()),
+                0,
+                5,
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
         assert_eq!(page1.rows.len(), 5);
@@ -490,7 +499,13 @@ mod test {
         // client/process) for page 2 — everything it needs is already in the
         // merged cache from page 1's over-fetch.
         let page2 = cache
-            .get_or_extend("q", &one_source(source.clone()), 5, 5, Duration::from_secs(1))
+            .get_or_extend(
+                "q",
+                &one_source(source.clone()),
+                5,
+                5,
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
 
@@ -514,7 +529,11 @@ mod test {
         let short = ScriptedSource::new("Short", vec![vec![row("s1")], vec![]]);
         let long = ScriptedSource::new(
             "Long",
-            vec![vec![row("l1"), row("l2")], vec![row("l3"), row("l4")], vec![]],
+            vec![
+                vec![row("l1"), row("l2")],
+                vec![row("l3"), row("l4")],
+                vec![],
+            ],
         );
 
         let result = cache
@@ -528,7 +547,10 @@ mod test {
             .await
             .unwrap();
 
-        assert!(result.has_more, "Long hasn't proven exhaustion within the rounds needed to fill the window");
+        assert!(
+            result.has_more,
+            "Long hasn't proven exhaustion within the rounds needed to fill the window"
+        );
     }
 
     #[tokio::test]
@@ -555,7 +577,11 @@ mod test {
             .get_or_extend("q", &one_source(c), 1, 1, Duration::from_secs(1))
             .await
             .unwrap();
-        assert_eq!(result2.rows.len(), 0, "no new merged row — it's the same URL");
+        assert_eq!(
+            result2.rows.len(),
+            0,
+            "no new merged row — it's the same URL"
+        );
 
         let result3 = cache
             .get_or_extend(
@@ -569,7 +595,10 @@ mod test {
             .unwrap();
         let mut engines3 = result3.rows[0].engines.clone();
         engines3.sort();
-        assert_eq!(engines3, vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+        assert_eq!(
+            engines3,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -577,15 +606,22 @@ mod test {
         let cache = test_cache().await;
         let source = ScriptedSource::new("A", vec![vec![row("old")]]);
         cache
-            .get_or_extend("stale query", &one_source(source), 0, 1, Duration::from_secs(1))
+            .get_or_extend(
+                "stale query",
+                &one_source(source),
+                0,
+                1,
+                Duration::from_secs(1),
+            )
             .await
             .unwrap();
 
         // Backdate it directly, then purge with a cutoff that only catches it.
-        let (query_id,): (i64,) = sqlx::query_as("SELECT id FROM queries WHERE query = 'stale query'")
-            .fetch_one(&cache.pool)
-            .await
-            .unwrap();
+        let (query_id,): (i64,) =
+            sqlx::query_as("SELECT id FROM queries WHERE query = 'stale query'")
+                .fetch_one(&cache.pool)
+                .await
+                .unwrap();
         sqlx::query("UPDATE queries SET fetched_at = ? WHERE id = ?")
             .bind(chrono::Utc::now().naive_utc() - chrono::Duration::days(30))
             .bind(query_id)

@@ -143,9 +143,7 @@ pub(crate) mod fixtures {
         let path = path_for(relative);
         let refresh = std::env::var_os("REFRESH_LIVE_FIXTURES").is_some();
 
-        if !refresh
-            && let Ok(html) = std::fs::read_to_string(&path)
-        {
+        if !refresh && let Ok(html) = std::fs::read_to_string(&path) {
             return html;
         }
 

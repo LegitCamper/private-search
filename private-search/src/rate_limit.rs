@@ -119,7 +119,10 @@ mod test {
         for _ in 0..3 {
             assert!(limiter.allow(ip(1)));
         }
-        assert!(!limiter.allow(ip(1)), "4th request in the window should be rejected");
+        assert!(
+            !limiter.allow(ip(1)),
+            "4th request in the window should be rejected"
+        );
     }
 
     #[test]

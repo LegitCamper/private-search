@@ -235,7 +235,11 @@ mod test {
         assert_eq!(results[1].title, "Rust in 100 seconds");
         assert_eq!(results[1].description, "A quick video overview.");
 
-        assert!(results.iter().all(|r| r.url != "https://example.com/ignored"));
+        assert!(
+            results
+                .iter()
+                .all(|r| r.url != "https://example.com/ignored")
+        );
     }
 
     const IMAGE_FIXTURE: &str = r#"
@@ -297,7 +301,9 @@ mod test {
         assert!(!page1.is_empty());
         assert!(!page2.is_empty());
         assert!(
-            page1.iter().all(|r| !page2.iter().any(|r2| r2.url == r.url)),
+            page1
+                .iter()
+                .all(|r| !page2.iter().any(|r2| r2.url == r.url)),
             "page 2 should not repeat page 1's results"
         );
     }

@@ -418,7 +418,10 @@ async fn image_cache() -> &'static MergedCache<CachedImage> {
 /// True only when there is nothing usable to return: every requested engine
 /// was actually contacted this call, and none of them succeeded.
 fn all_contacted_engines_failed(outcomes: &[(String, EngineOutcome)]) -> bool {
-    !outcomes.is_empty() && outcomes.iter().all(|(_, o)| !matches!(o, EngineOutcome::Ok))
+    !outcomes.is_empty()
+        && outcomes
+            .iter()
+            .all(|(_, o)| !matches!(o, EngineOutcome::Ok))
 }
 
 /// Builds and runs a text search across one or more engines.

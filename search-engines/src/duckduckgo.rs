@@ -138,7 +138,9 @@ mod test {
         assert!(looks_like_search_results(
             r#"<div class="serp__results">...</div>"#
         ));
-        assert!(!looks_like_search_results("<html><body>unusual traffic</body></html>"));
+        assert!(!looks_like_search_results(
+            "<html><body>unusual traffic</body></html>"
+        ));
     }
 
     #[test]
