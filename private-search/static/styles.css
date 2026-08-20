@@ -1,11 +1,16 @@
 html, body {
     height: 100%;
     margin: 0;
+    font-family: 'Inter', sans-serif;
     background-color: #1e1e2e;
     color: white;
 
     display: flex;
     flex-direction: column;
+}
+
+button, input, select, textarea {
+    font-family: inherit;
 }
 
 .homepage-footer {
@@ -124,7 +129,6 @@ html, body {
     flex-direction: column;
     gap: 1rem;
     color: #cdd6f4;
-    font-family: 'Inter', sans-serif;
 }
 
 .result, .result-skeleton {
@@ -316,4 +320,3 @@ figcaption {
     padding: 2rem 1rem;
     font-size: 1rem;
 }
-
