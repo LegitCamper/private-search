@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode, utf8_percent_encode};
 use reqwest::Url;
 
-use crate::{EngineError, EngineInfo, RawResult, SearchEngine, new_rand_client, parse_search};
+use crate::{
+    BlockKind, EngineError, EngineInfo, RawResult, SearchEngine, body_or_block, new_rand_client,
+    parse_search,
+};
 
 #[derive(Clone)]
 pub struct DuckDuckGo;
@@ -32,6 +35,10 @@ fn looks_like_search_results(html: &str) -> bool {
     html.contains("serp__results")
 }
 
+fn looks_like_captcha(html: &str) -> bool {
+    html.contains(r#"id="challenge-form""#) || html.contains("anomaly")
+}
+
 #[async_trait]
 impl SearchEngine for DuckDuckGo {
     async fn search_results(
@@ -46,10 +53,19 @@ impl SearchEngine for DuckDuckGo {
             .await
             .map_err(EngineError::ReqwestError)?;
 
-        let html = resp.text().await.map_err(EngineError::ReqwestError)?;
+        let html = body_or_block(resp, "DuckDuckGo").await?;
+        if looks_like_captcha(&html) {
+            // DDG serves its challenge page with HTTP 202, so status alone
+            // cannot detect this bot wall.
+            return Err(EngineError::Blocked {
+                kind: BlockKind::Captcha,
+                retry_after: None,
+                detail: "DuckDuckGo challenge page".into(),
+            });
+        }
         if !looks_like_search_results(&html) {
             return Err(EngineError::ParseError(
-                "DuckDuckGo response didn't look like real results (likely blocked)".into(),
+                "DuckDuckGo response markup may have changed; results marker was missing".into(),
             ));
         }
 
@@ -141,6 +157,14 @@ mod test {
         assert!(!looks_like_search_results(
             "<html><body>unusual traffic</body></html>"
         ));
+    }
+
+    #[test]
+    fn looks_like_captcha_detects_the_ddg_challenge_page() {
+        assert!(looks_like_captcha(
+            r#"<form id="challenge-form">captcha</form>"#
+        ));
+        assert!(!looks_like_captcha(SEARCH_FIXTURE));
     }
 
     #[test]

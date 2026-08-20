@@ -10,6 +10,7 @@ use rand::seq::IndexedRandom;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 mod brave;
 mod duckduckgo;
@@ -33,11 +34,39 @@ pub struct RawImage {
     pub title: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    RateLimited,
+    AccessDenied,
+    Captcha,
+    ServerError,
+}
+
+impl std::fmt::Display for BlockKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            BlockKind::RateLimited => "rate limited",
+            BlockKind::AccessDenied => "access denied",
+            BlockKind::Captcha => "captcha",
+            BlockKind::ServerError => "server error",
+        };
+        f.write_str(name)
+    }
+}
+
 #[derive(Debug)]
 pub enum EngineError {
     ReqwestError(reqwest::Error),
     ParseError(String),
     Timeout, // engine timeout
+    // A captcha or rate limit calls for backoff, while a missing results
+    // marker on a healthy 200 means our selectors are stale and need a code
+    // fix. Keeping those cases distinct makes both diagnosable.
+    Blocked {
+        kind: BlockKind,
+        retry_after: Option<Duration>,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for EngineError {
@@ -46,6 +75,17 @@ impl std::fmt::Display for EngineError {
             EngineError::ReqwestError(e) => write!(f, "request failed: {e}"),
             EngineError::ParseError(e) => write!(f, "parse error: {e}"),
             EngineError::Timeout => write!(f, "engine timed out"),
+            EngineError::Blocked {
+                kind,
+                retry_after,
+                detail,
+            } => {
+                write!(f, "engine {kind}: {detail}")?;
+                if let Some(retry_after) = retry_after {
+                    write!(f, " (retry after {}s)", retry_after.as_secs())?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -112,6 +152,44 @@ fn new_rand_client() -> Client {
         .choose(&mut rand::rng())
         .expect("USER_AGENTS is non-empty")
         .clone()
+}
+
+fn classify_status(
+    status: u16,
+    retry_after: Option<&str>,
+) -> Option<(BlockKind, Option<Duration>)> {
+    let retry_after = retry_after
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs);
+
+    match status {
+        402 | 429 => Some((BlockKind::RateLimited, retry_after)),
+        403 => Some((BlockKind::AccessDenied, None)),
+        500..=599 => Some((BlockKind::ServerError, None)),
+        _ => None,
+    }
+}
+
+pub(crate) async fn body_or_block(
+    resp: reqwest::Response,
+    engine: &'static str,
+) -> Result<String, EngineError> {
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+
+    if let Some((kind, retry_after)) = classify_status(status.as_u16(), retry_after.as_deref()) {
+        return Err(EngineError::Blocked {
+            kind,
+            retry_after,
+            detail: format!("{engine} returned HTTP {}", status.as_u16()),
+        });
+    }
+
+    resp.text().await.map_err(EngineError::ReqwestError)
 }
 
 /// Record-once, replay-forever HTML fixtures for the "live" engine tests: the
@@ -251,6 +329,44 @@ pub fn parse_images(
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn classify_status_maps_429_to_rate_limited() {
+        assert_eq!(
+            classify_status(429, None),
+            Some((BlockKind::RateLimited, None))
+        );
+    }
+
+    #[test]
+    fn classify_status_parses_retry_after_seconds() {
+        assert_eq!(
+            classify_status(429, Some("120")),
+            Some((BlockKind::RateLimited, Some(Duration::from_secs(120))))
+        );
+    }
+
+    #[test]
+    fn classify_status_maps_403_to_access_denied() {
+        assert_eq!(
+            classify_status(403, Some("120")),
+            Some((BlockKind::AccessDenied, None))
+        );
+    }
+
+    #[test]
+    fn classify_status_maps_5xx_to_server_error() {
+        assert_eq!(
+            classify_status(503, None),
+            Some((BlockKind::ServerError, None))
+        );
+    }
+
+    #[test]
+    fn classify_status_returns_none_for_200_and_202() {
+        assert_eq!(classify_status(200, None), None);
+        assert_eq!(classify_status(202, None), None);
+    }
 
     #[test]
     fn parse_search_extracts_all_fields() {

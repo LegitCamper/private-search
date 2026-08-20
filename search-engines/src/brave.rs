@@ -1,6 +1,6 @@
 use crate::{
-    EngineError, EngineInfo, ImageEngine, RawImage, RawResult, SearchEngine, new_rand_client,
-    parse_images, parse_search,
+    EngineError, EngineInfo, ImageEngine, RawImage, RawResult, SearchEngine, body_or_block,
+    new_rand_client, parse_images, parse_search,
 };
 use async_trait::async_trait;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -60,10 +60,10 @@ impl SearchEngine for Brave {
             .await
             .map_err(EngineError::ReqwestError)?;
 
-        let html = resp.text().await.map_err(EngineError::ReqwestError)?;
+        let html = body_or_block(resp, "Brave").await?;
         if !looks_like_search_results(&html) {
             return Err(EngineError::ParseError(
-                "Brave response didn't look like real results (likely blocked)".into(),
+                "Brave response markup may have changed; results marker was missing".into(),
             ));
         }
 
@@ -102,10 +102,10 @@ impl ImageEngine for Brave {
             .await
             .map_err(EngineError::ReqwestError)?;
 
-        let html = resp.text().await.map_err(EngineError::ReqwestError)?;
+        let html = body_or_block(resp, "Brave").await?;
         if !looks_like_image_results(&html) {
             return Err(EngineError::ParseError(
-                "Brave image response didn't look like real results (likely blocked)".into(),
+                "Brave image response markup may have changed; results marker was missing".into(),
             ));
         }
 
