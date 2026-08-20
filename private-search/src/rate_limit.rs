@@ -15,6 +15,10 @@ use rocket::{
 const WINDOW: Duration = Duration::from_secs(60);
 const MAX_REQUESTS_PER_WINDOW: u32 = 30;
 
+/// Hard cap on distinct IPs tracked at once. Bounds worst-case memory even
+/// if a flood of distinct addresses arrives faster than sweeps can run.
+const MAX_TRACKED_IPS: usize = 100_000;
+
 /// Per-IP fixed-window limiter. `/query` fans a single request out to
 /// multiple upstream search engines, so letting it be hit unbounded means
 /// letting *those* engines be hit unbounded through us — risking an IP ban
@@ -24,6 +28,10 @@ pub struct RateLimiter {
     hits: Mutex<HashMap<IpAddr, (Instant, u32)>>,
     window: Duration,
     max_per_window: u32,
+    // Guards the sweep cadence rather than the map itself, so it is a
+    // separate lock: checking "is it time to sweep" must not require
+    // holding `hits`'s lock for longer than the sweep itself takes.
+    last_sweep: Mutex<Instant>,
 }
 
 impl Default for RateLimiter {
@@ -41,14 +49,53 @@ impl RateLimiter {
             hits: Mutex::new(HashMap::new()),
             window,
             max_per_window,
+            last_sweep: Mutex::new(Instant::now()),
+        }
+    }
+
+    #[cfg(test)]
+    fn tracked_ips(&self) -> usize {
+        self.hits.lock().unwrap().len()
+    }
+
+    /// Drops every tracked entry whose window has expired. Those entries can
+    /// only ever hit the `_ =>` arm in `allow` from here on, so removing them
+    /// changes no behavior — this is purely about reclaiming memory for IPs
+    /// that never come back.
+    ///
+    /// Runs opportunistically from inside `allow`, at most once per
+    /// `window`, rather than on a background task: the map is cheap to walk,
+    /// and a background task would mean another handle to spawn, own, and
+    /// shut down for what is otherwise a stateless, self-contained type.
+    fn sweep(&self, now: Instant) {
+        let mut last_sweep = self.last_sweep.lock().unwrap();
+        if now.duration_since(*last_sweep) < self.window {
+            return;
+        }
+        *last_sweep = now;
+        drop(last_sweep);
+
+        let mut hits = self.hits.lock().unwrap();
+        hits.retain(|_, (window_start, _)| now.duration_since(*window_start) < self.window);
+
+        // A sweep alone isn't enough if distinct IPs are arriving faster
+        // than we can reclaim them — an active flood, not stale leftovers.
+        // A per-IP limiter can't meaningfully constrain an attacker who is
+        // spraying that many distinct addresses anyway, so a bounded map
+        // that occasionally forgets everyone is strictly better than an
+        // unbounded one that OOMs the process.
+        if hits.len() > MAX_TRACKED_IPS {
+            hits.clear();
         }
     }
 
     /// Returns `true` if `ip` is still under the limit for its current
     /// window (and records the hit), `false` if it should be rejected.
     fn allow(&self, ip: IpAddr) -> bool {
-        let mut hits = self.hits.lock().unwrap();
         let now = Instant::now();
+        self.sweep(now);
+
+        let mut hits = self.hits.lock().unwrap();
 
         match hits.get_mut(&ip) {
             Some((window_start, count)) if now.duration_since(*window_start) < self.window => {
@@ -143,5 +190,46 @@ mod test {
         std::thread::sleep(Duration::from_millis(40));
 
         assert!(limiter.allow(ip(1)), "a new window should reset the budget");
+    }
+
+    #[test]
+    fn stale_entries_are_evicted_so_the_map_does_not_grow_without_bound() {
+        let limiter = RateLimiter::new(Duration::from_millis(20), 5);
+
+        for i in 0u32..200 {
+            let [a, b, c, d] = i.to_be_bytes();
+            assert!(limiter.allow(IpAddr::from([a, b, c, d])));
+        }
+
+        std::thread::sleep(Duration::from_millis(40));
+
+        // One more request, from an IP not already tracked, to trigger the
+        // opportunistic sweep.
+        assert!(limiter.allow(IpAddr::from([255, 255, 255, 255])));
+
+        assert!(
+            limiter.tracked_ips() <= 2,
+            "expected stale entries to be evicted, found {} tracked IPs",
+            limiter.tracked_ips()
+        );
+    }
+
+    #[test]
+    fn a_sweep_does_not_reset_an_active_ips_budget() {
+        let limiter = RateLimiter::new(Duration::from_secs(60), 3);
+
+        // Populate the map with other IPs so a sweep has something to walk,
+        // though none of these are stale within this test's long window.
+        for n in 2u8..10 {
+            assert!(limiter.allow(ip(n)));
+        }
+
+        for _ in 0..3 {
+            assert!(limiter.allow(ip(1)));
+        }
+        assert!(
+            !limiter.allow(ip(1)),
+            "budget should still be exhausted after a sweep runs"
+        );
     }
 }
