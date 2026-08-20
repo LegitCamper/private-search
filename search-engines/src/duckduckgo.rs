@@ -3,7 +3,7 @@ use percent_encoding::{NON_ALPHANUMERIC, percent_decode, utf8_percent_encode};
 use reqwest::Url;
 
 use crate::{
-    BlockKind, EngineError, EngineInfo, RawResult, SearchEngine, body_or_block, new_rand_client,
+    BlockKind, EngineError, EngineInfo, RawResult, SearchEngine, body_or_block, browser_client,
     parse_search,
 };
 
@@ -47,7 +47,7 @@ impl SearchEngine for DuckDuckGo {
         start: usize,
         _count: usize,
     ) -> Result<Vec<RawResult>, EngineError> {
-        let resp = new_rand_client()
+        let resp = browser_client()
             .get(build_search_url(query, start))
             .send()
             .await

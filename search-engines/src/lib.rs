@@ -6,8 +6,13 @@
 //! deduplication, and persistence.
 
 use async_trait::async_trait;
-use rand::seq::IndexedRandom;
-use reqwest::Client;
+use reqwest::{
+    Client,
+    header::{
+        ACCEPT, ACCEPT_LANGUAGE, CONNECTION, DNT, HeaderMap, HeaderName, HeaderValue,
+        UPGRADE_INSECURE_REQUESTS,
+    },
+};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -121,36 +126,52 @@ pub trait ImageEngine: EngineInfo + Clone + Send {
     ) -> Result<Vec<RawImage>, EngineError>;
 }
 
-static USER_AGENTS: &[&str] = &[
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:118.0) Gecko/20100101 Firefox/118.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.72 Safari/537.36",
-];
+/// A single Firefox identity keeps the complete header set internally
+/// consistent across requests. Firefox is used because it does not send
+/// Chrome's client-hint headers, which this client cannot plausibly emulate.
+static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
 
-/// One [`Client`] per user agent, built once and reused so requests actually
-/// benefit from connection pooling/keep-alive instead of paying a fresh
-/// TCP+TLS handshake on every single search. Cloning a `Client` is cheap —
-/// it's just an `Arc` around the shared connection pool.
-static CLIENTS: std::sync::OnceLock<Vec<Client>> = std::sync::OnceLock::new();
+/// Builds one reusable browser-like client so its identity stays stable for
+/// token-based flows while requests benefit from connection pooling.
+fn browser_client() -> Client {
+    CLIENT
+        .get_or_init(|| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                ACCEPT,
+                HeaderValue::from_static(
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                ),
+            );
+            headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.5"));
+            headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
+            headers.insert(UPGRADE_INSECURE_REQUESTS, HeaderValue::from_static("1"));
+            headers.insert(DNT, HeaderValue::from_static("1"));
+            headers.insert(
+                HeaderName::from_static("sec-fetch-dest"),
+                HeaderValue::from_static("document"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-fetch-mode"),
+                HeaderValue::from_static("navigate"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-fetch-site"),
+                HeaderValue::from_static("none"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-fetch-user"),
+                HeaderValue::from_static("?1"),
+            );
 
-/// Picks a random pre-built client (rotating user agent across requests to
-/// avoid looking like a single scripted client to the upstream engine).
-fn new_rand_client() -> Client {
-    let clients = CLIENTS.get_or_init(|| {
-        USER_AGENTS
-            .iter()
-            .map(|ua| {
-                Client::builder()
-                    .user_agent(*ua)
-                    .build()
-                    .expect("failed to build reqwest client")
-            })
-            .collect()
-    });
-
-    clients
-        .choose(&mut rand::rng())
-        .expect("USER_AGENTS is non-empty")
+            Client::builder()
+                .user_agent(
+                    "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0",
+                )
+                .default_headers(headers)
+                .build()
+                .expect("failed to build browser client")
+        })
         .clone()
 }
 
@@ -225,7 +246,7 @@ pub(crate) mod fixtures {
             return html;
         }
 
-        let html = super::new_rand_client()
+        let html = super::browser_client()
             .get(url)
             .send()
             .await
@@ -431,5 +452,57 @@ mod test {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].url, "");
         assert_eq!(images[0].title, "");
+    }
+
+    #[tokio::test]
+    async fn browser_client_sends_consistent_headers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let bytes_read = stream.read(&mut chunk).await.unwrap();
+                assert!(bytes_read > 0, "request ended before its header terminator");
+                request.extend_from_slice(&chunk[..bytes_read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+                .await
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        let response = browser_client()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "hi");
+
+        let request = server.await.unwrap();
+        let request_lowercase = request.to_ascii_lowercase();
+        let user_agent = request_lowercase
+            .lines()
+            .find(|line| line.starts_with("user-agent:"))
+            .expect("the browser client should send a User-Agent header");
+        assert!(user_agent.contains("firefox/153.0"));
+        assert!(request_lowercase.contains("accept:"));
+        assert!(request_lowercase.contains("accept-language:"));
+        assert!(request_lowercase.contains("sec-fetch-mode:"));
+        assert!(request_lowercase.contains("upgrade-insecure-requests:"));
+
+        let accept_encoding = request_lowercase
+            .lines()
+            .find(|line| line.starts_with("accept-encoding:"));
+        println!("reqwest sent Accept-Encoding: {accept_encoding:?}");
     }
 }

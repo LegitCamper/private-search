@@ -1,6 +1,6 @@
 use crate::{
     EngineError, EngineInfo, ImageEngine, RawImage, RawResult, SearchEngine, body_or_block,
-    new_rand_client, parse_images, parse_search,
+    browser_client, parse_images, parse_search,
 };
 use async_trait::async_trait;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -54,7 +54,7 @@ impl SearchEngine for Brave {
         start: usize,
         _count: usize,
     ) -> Result<Vec<RawResult>, EngineError> {
-        let resp = new_rand_client()
+        let resp = browser_client()
             .get(build_search_url(query, start))
             .send()
             .await
@@ -96,7 +96,7 @@ impl ImageEngine for Brave {
         _start: usize,
         _count: usize,
     ) -> Result<Vec<RawImage>, EngineError> {
-        let resp = new_rand_client()
+        let resp = browser_client()
             .get(build_image_search_url(query))
             .send()
             .await
