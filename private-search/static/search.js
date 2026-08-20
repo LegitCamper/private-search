@@ -85,6 +85,7 @@ function renderEngineStatus(engines) {
       const label =
         status === "ok" ? "responded"
         : status === "timed_out" ? "timed out"
+        : status === "cooling_down" ? "paused"
         : "failed";
 
       return `

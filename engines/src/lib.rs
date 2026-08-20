@@ -29,7 +29,13 @@ use async_trait::async_trait;
 use search_cache::{CacheableRow, EngineOutcome, EngineSource, MergedCache, Ranker};
 use search_engines::{Brave, DuckDuckGo, EngineInfo, ImageEngine, SearchEngine};
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, fmt, sync::Arc, time::Duration};
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    fmt,
+    sync::{Arc, Mutex as StdMutex, OnceLock},
+    time::{Duration, Instant},
+};
 use tokio::sync::OnceCell;
 
 const ENGINE_TIMEOUT: u64 = 3; // seconds
@@ -38,6 +44,94 @@ const DEFAULT_IMAGE_COUNT: usize = 50;
 /// Hint passed to an engine adapter's own page size — most of ours ignore it
 /// and return whatever a real page contains (see `search-engines`).
 const ENGINE_PAGE_HINT: usize = 20;
+
+/// Once an engine fails or times out, contacting it again on every
+/// subsequent `/query` request is exactly the sustained futile traffic that
+/// keeps an IP-reputation-based soft block (e.g. DuckDuckGo's bot wall) from
+/// ever decaying into an unblock. This registry makes an engine that just
+/// failed sit out for a growing window instead of being hit again
+/// immediately: the window escalates on consecutive failures and resets the
+/// instant the engine succeeds again.
+struct CooldownState {
+    consecutive_failures: u32,
+    cooling_until: Option<Instant>,
+}
+
+static COOLDOWNS: OnceLock<StdMutex<HashMap<&'static str, CooldownState>>> = OnceLock::new();
+
+fn cooldowns() -> &'static StdMutex<HashMap<&'static str, CooldownState>> {
+    COOLDOWNS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Reads `env_var` as a `u64` seconds count, falling back to `default_secs`
+/// if unset or unparseable. Mirrors the same-named helper in
+/// `private-search/src/main.rs`; duplicated here rather than shared because
+/// it's three lines and this crate has no other reason to depend on the
+/// binary crate (which depends on it, not the other way around).
+fn resolve_secs(env_var: &str, default_secs: u64) -> Duration {
+    std::env::var(env_var)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(default_secs))
+}
+
+/// Base of the escalating cooldown window (default 60s). Setting this to 0
+/// via `ENGINE_COOLDOWN_BASE_SECS` disables cooldowns entirely, without a
+/// rebuild — every call to `record_failure` becomes a no-op and
+/// `cooldown_remaining` always reports the engine as usable.
+fn cooldown_base() -> Duration {
+    static BASE: OnceLock<Duration> = OnceLock::new();
+    *BASE.get_or_init(|| resolve_secs("ENGINE_COOLDOWN_BASE_SECS", 60))
+}
+
+/// Cap on the escalating cooldown window (default 1800s / 30 minutes).
+fn cooldown_cap() -> Duration {
+    static CAP: OnceLock<Duration> = OnceLock::new();
+    *CAP.get_or_init(|| resolve_secs("ENGINE_COOLDOWN_MAX_SECS", 1800))
+}
+
+/// `None` if `engine` is usable right now (never failed, or its cooldown has
+/// already elapsed); otherwise the time remaining before it's usable again.
+fn cooldown_remaining(engine: &'static str) -> Option<Duration> {
+    let until = cooldowns().lock().unwrap().get(engine)?.cooling_until?;
+    let now = Instant::now();
+    (until > now).then(|| until - now)
+}
+
+/// Marks `engine` as having just failed/timed out, escalating its cooldown:
+/// the 1st consecutive failure sets `cooldown_base()`, then it doubles per
+/// additional consecutive failure, capped at `cooldown_cap()`. A no-op if
+/// cooldowns are disabled (`cooldown_base()` is zero).
+fn record_failure(engine: &'static str) {
+    let base = cooldown_base();
+    if base.is_zero() {
+        return;
+    }
+    let mut map = cooldowns().lock().unwrap();
+    let state = map.entry(engine).or_insert(CooldownState {
+        consecutive_failures: 0,
+        cooling_until: None,
+    });
+    state.consecutive_failures += 1;
+    // Shift amount is capped well below 64 so this can't overflow even if a
+    // test (or a very long-running process) drives the failure count high;
+    // `saturating_mul` below then caps the resulting duration long before it
+    // could overflow `Instant` addition, since `.min(cooldown_cap())` bounds
+    // it to a realistic, operator-configured ceiling.
+    let exponent = (state.consecutive_failures - 1).min(32);
+    let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
+    let backoff =
+        Duration::from_secs(base.as_secs().saturating_mul(multiplier)).min(cooldown_cap());
+    state.cooling_until = Some(Instant::now() + backoff);
+}
+
+/// Clears any cooldown/failure-count for `engine` — called on an `Ok`
+/// outcome so a subsequently-healthy engine isn't left cooling down from an
+/// earlier, now-irrelevant, streak of failures.
+fn record_success(engine: &'static str) {
+    cooldowns().lock().unwrap().remove(engine);
+}
 
 pub async fn init_db() {
     search_cache::shared_pool().await;
@@ -127,6 +221,13 @@ pub enum FetchError {
     /// failed/timed out, and there was nothing already cached to fall back
     /// on — a genuine total outage, not just "no more results".
     AllEnginesFailed,
+    /// Every requested engine was skipped this call because each one is
+    /// still cooling down from a recent failure — so, unlike
+    /// `AllEnginesFailed`, *nothing was contacted this call, by design* —
+    /// and there was nothing already cached to fall back on either. This is
+    /// expected, self-healing behavior (the cooldown doing its job), not a
+    /// fault.
+    AllEnginesCoolingDown,
 }
 
 impl fmt::Display for FetchError {
@@ -134,6 +235,7 @@ impl fmt::Display for FetchError {
         match self {
             FetchError::Cache(e) => write!(f, "cache error: {e}"),
             FetchError::AllEnginesFailed => write!(f, "all engines failed"),
+            FetchError::AllEnginesCoolingDown => write!(f, "all engines cooling down"),
         }
     }
 }
@@ -154,6 +256,11 @@ pub enum EngineStatus {
     Ok,
     TimedOut,
     Failed(String),
+    /// Skipped this call, without being contacted, because it's still
+    /// cooling down from a recent failure. Never produced by the cache (see
+    /// `From<&EngineOutcome>` below) — it's synthesized in the builder for
+    /// engines it deliberately didn't pass along as sources.
+    CoolingDown(String),
 }
 
 impl From<&EngineOutcome> for EngineStatus {
@@ -424,6 +531,80 @@ fn all_contacted_engines_failed(outcomes: &[(String, EngineOutcome)]) -> bool {
             .all(|(_, o)| !matches!(o, EngineOutcome::Ok))
 }
 
+/// Splits `engines` into those usable right now and those still cooling
+/// down (paired with their remaining cooldown). Shared by
+/// `SearchBuilder`/`ImageSearchBuilder` since the cooldown registry is keyed
+/// purely by engine name, independent of which enum (`SearchEngines` or
+/// `ImageEngines`) the caller happens to use.
+fn partition_by_cooldown<E: Copy>(
+    engines: &[E],
+    name_of: impl Fn(E) -> &'static str,
+) -> (Vec<E>, Vec<(E, Duration)>) {
+    let mut usable = Vec::new();
+    let mut cooling = Vec::new();
+    for &e in engines {
+        match cooldown_remaining(name_of(e)) {
+            Some(remaining) => cooling.push((e, remaining)),
+            None => usable.push(e),
+        }
+    }
+    (usable, cooling)
+}
+
+/// Feeds this call's outcomes back into the cooldown registry: a success
+/// clears any cooldown, a failure/timeout starts or extends one. Only
+/// `usable` engines can have an outcome at all — a cooling engine was never
+/// contacted this call, so it has nothing to record.
+fn record_outcomes<E: Copy>(
+    usable: &[E],
+    name_of: impl Fn(E) -> &'static str,
+    outcomes: &[(String, EngineOutcome)],
+) {
+    for &e in usable {
+        let name = name_of(e);
+        if let Some((_, outcome)) = outcomes.iter().find(|(n, _)| n == name) {
+            match outcome {
+                EngineOutcome::Ok => record_success(name),
+                EngineOutcome::Failed(_) | EngineOutcome::TimedOut => record_failure(name),
+            }
+        }
+    }
+}
+
+/// Builds one `EngineReport` per requested engine, in the original request
+/// order, so a cooling engine still shows up in the response (as
+/// `EngineStatus::CoolingDown`) instead of silently vanishing from it —
+/// callers need to know an engine was deliberately skipped, not just absent.
+fn build_reports<E: Copy + PartialEq>(
+    engines: &[E],
+    name_of: impl Fn(E) -> &'static str,
+    cooling: &[(E, Duration)],
+    outcomes: &[(String, EngineOutcome)],
+) -> Vec<EngineReport> {
+    engines
+        .iter()
+        .map(|&e| {
+            let name = name_of(e);
+            if let Some((_, remaining)) = cooling.iter().find(|(ce, _)| *ce == e) {
+                EngineReport {
+                    engine: name.to_string(),
+                    status: EngineStatus::CoolingDown(format!("retry in {}s", remaining.as_secs())),
+                }
+            } else {
+                let status = outcomes
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, o)| EngineStatus::from(o))
+                    .unwrap_or(EngineStatus::Ok);
+                EngineReport {
+                    engine: name.to_string(),
+                    status,
+                }
+            }
+        })
+        .collect()
+}
+
 /// Builds and runs a text search across one or more engines.
 ///
 /// Defaults: every engine in [`SearchEngines::all`], 10 results from 0, 3s timeout.
@@ -489,34 +670,37 @@ impl SearchBuilder {
             self.engines
         };
 
+        let (usable, cooling) = partition_by_cooldown(&engines, SearchEngines::name);
+
+        // Even with zero sources, `get_or_extend` can still serve rows
+        // already in the merged cache — that's the main benefit of cooling
+        // down an engine instead of just erroring out, so this call is never
+        // skipped even when every engine is currently cooling.
         let sources: Vec<Arc<dyn EngineSource<CachedResult>>> =
-            engines.iter().map(|e| e.source()).collect();
+            usable.iter().map(|e| e.source()).collect();
 
         let extend = text_cache()
             .await
             .get_or_extend(&self.query, &sources, self.start, self.count, self.timeout)
             .await?;
 
-        if extend.rows.is_empty() && all_contacted_engines_failed(&extend.engine_outcomes) {
-            return Err(FetchError::AllEnginesFailed);
+        record_outcomes(&usable, SearchEngines::name, &extend.engine_outcomes);
+
+        if extend.rows.is_empty() {
+            if usable.is_empty() {
+                return Err(FetchError::AllEnginesCoolingDown);
+            }
+            if all_contacted_engines_failed(&extend.engine_outcomes) {
+                return Err(FetchError::AllEnginesFailed);
+            }
         }
 
-        let reports = engines
-            .iter()
-            .map(|e| {
-                let name = e.name();
-                let status = extend
-                    .engine_outcomes
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, o)| EngineStatus::from(o))
-                    .unwrap_or(EngineStatus::Ok);
-                EngineReport {
-                    engine: name.to_string(),
-                    status,
-                }
-            })
-            .collect();
+        let reports = build_reports(
+            &engines,
+            SearchEngines::name,
+            &cooling,
+            &extend.engine_outcomes,
+        );
 
         let results = extend
             .rows
@@ -603,34 +787,37 @@ impl ImageSearchBuilder {
             self.engines
         };
 
+        let (usable, cooling) = partition_by_cooldown(&engines, ImageEngines::name);
+
+        // Even with zero sources, `get_or_extend` can still serve rows
+        // already in the merged cache — that's the main benefit of cooling
+        // down an engine instead of just erroring out, so this call is never
+        // skipped even when every engine is currently cooling.
         let sources: Vec<Arc<dyn EngineSource<CachedImage>>> =
-            engines.iter().map(|e| e.source()).collect();
+            usable.iter().map(|e| e.source()).collect();
 
         let extend = image_cache()
             .await
             .get_or_extend(&self.query, &sources, self.start, self.count, self.timeout)
             .await?;
 
-        if extend.rows.is_empty() && all_contacted_engines_failed(&extend.engine_outcomes) {
-            return Err(FetchError::AllEnginesFailed);
+        record_outcomes(&usable, ImageEngines::name, &extend.engine_outcomes);
+
+        if extend.rows.is_empty() {
+            if usable.is_empty() {
+                return Err(FetchError::AllEnginesCoolingDown);
+            }
+            if all_contacted_engines_failed(&extend.engine_outcomes) {
+                return Err(FetchError::AllEnginesFailed);
+            }
         }
 
-        let reports = engines
-            .iter()
-            .map(|e| {
-                let name = e.name();
-                let status = extend
-                    .engine_outcomes
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, o)| EngineStatus::from(o))
-                    .unwrap_or(EngineStatus::Ok);
-                EngineReport {
-                    engine: name.to_string(),
-                    status,
-                }
-            })
-            .collect();
+        let reports = build_reports(
+            &engines,
+            ImageEngines::name,
+            &cooling,
+            &extend.engine_outcomes,
+        );
 
         let results = extend
             .rows
@@ -654,6 +841,63 @@ impl ImageSearchBuilder {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    // The cooldown registry is process-global, and Rust runs `#[test]`s
+    // concurrently in one process, so every test below uses its own
+    // never-reused engine-name key rather than a shared name or relying on
+    // env vars differing per test — otherwise these tests would race each
+    // other through shared state.
+
+    #[test]
+    fn cooldown_remaining_is_none_for_an_engine_that_has_not_failed() {
+        assert!(cooldown_remaining("test-engine-1").is_none());
+    }
+
+    #[test]
+    fn record_failure_puts_an_engine_into_cooldown() {
+        record_failure("test-engine-2");
+
+        let remaining = cooldown_remaining("test-engine-2");
+        assert!(remaining.is_some());
+        assert!(remaining.unwrap() > Duration::ZERO);
+    }
+
+    #[test]
+    fn record_success_clears_an_existing_cooldown() {
+        record_failure("test-engine-3");
+        assert!(cooldown_remaining("test-engine-3").is_some());
+
+        record_success("test-engine-3");
+        assert!(cooldown_remaining("test-engine-3").is_none());
+    }
+
+    #[test]
+    fn consecutive_failures_escalate_the_cooldown_window() {
+        record_failure("test-engine-4");
+        let first = cooldown_remaining("test-engine-4").unwrap();
+
+        record_failure("test-engine-4");
+        let second = cooldown_remaining("test-engine-4").unwrap();
+
+        assert!(
+            second > first,
+            "second consecutive failure's window ({second:?}) should exceed the first's ({first:?})"
+        );
+    }
+
+    #[test]
+    fn the_cooldown_window_is_capped() {
+        for _ in 0..20 {
+            record_failure("test-engine-5");
+        }
+
+        let remaining = cooldown_remaining("test-engine-5").unwrap();
+        assert!(
+            remaining <= cooldown_cap(),
+            "remaining ({remaining:?}) should never exceed the configured cap ({:?})",
+            cooldown_cap()
+        );
+    }
 
     fn r(url: &str) -> CachedResult {
         CachedResult {

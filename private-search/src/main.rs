@@ -259,11 +259,18 @@ async fn query(
         let status = match &e {
             FetchError::Cache(_) => Status::InternalServerError,
             FetchError::AllEnginesFailed => Status::BadGateway,
+            FetchError::AllEnginesCoolingDown => Status::ServiceUnavailable,
         };
         match &e {
             FetchError::Cache(cache_err) => log::error!("cache db error: {cache_err}"),
             FetchError::AllEnginesFailed => {
                 log::error!("all engines failed: tab={tab} query={query:?}")
+            }
+            // Not an error worth alarming on: the cooldown is working as
+            // intended, deliberately skipping engines that recently failed
+            // instead of hammering them again.
+            FetchError::AllEnginesCoolingDown => {
+                log::warn!("all engines cooling down: tab={tab} query={query:?}")
             }
         }
         api_error(status, "query failed")
