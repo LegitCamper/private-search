@@ -143,14 +143,22 @@ impl Fairing for CacheFairing {
     }
 
     async fn on_response<'r>(&self, req: &'r Request<'_>, res: &mut Response<'r>) {
-        if req.uri().path().starts_with("/static/")
-            || req.uri().path().starts_with("/search")
-            || req.uri().path() == "/"
-        {
+        let path = req.uri().path();
+
+        if path.starts_with("/static/") {
+            // Safe to cache hard: templates request these with `?v={version}`,
+            // so a deploy that changes an asset changes its URL.
             res.set_header(rocket::http::Header::new(
                 "Cache-Control",
-                "public, max-age=86400 ",
+                "public, max-age=86400",
             ));
+        } else if path.starts_with("/search") || path == "/" {
+            // The pages themselves must revalidate. They carry the `?v=`
+            // markers that bust every other asset, so caching them for a day
+            // pins a returning visitor to a day-old page — including its old
+            // asset URLs, which is how a shipped frontend fix can go
+            // completely unnoticed by the people who use the site most.
+            res.set_header(rocket::http::Header::new("Cache-Control", "no-cache"));
         }
     }
 }
@@ -329,6 +337,24 @@ mod test {
         let res = client.get("/search").dispatch().await;
         assert_eq!(res.status(), Status::SeeOther);
         assert_eq!(res.headers().get_one("Location"), Some("/"));
+    }
+
+    #[rocket::async_test]
+    async fn search_pages_are_revalidated_but_static_assets_are_cached() {
+        let client = client().await;
+
+        let page = client.get("/search?q=rust&t=general").dispatch().await;
+        assert_eq!(
+            page.headers().get_one("Cache-Control"),
+            Some("no-cache"),
+            "a cached search page keeps serving stale `?v=` asset URLs"
+        );
+
+        let asset = client.get("/static/search-core.js").dispatch().await;
+        assert_eq!(
+            asset.headers().get_one("Cache-Control"),
+            Some("public, max-age=86400")
+        );
     }
 
     #[rocket::async_test]

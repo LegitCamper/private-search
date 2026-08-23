@@ -29,9 +29,19 @@
 <!-- IMAGE GALLERY (HIDDEN BY DEFAULT) -->
 <div class="image-gallery"></div>
 
+<!-- END-OF-RESULTS MARKER: watched by search.js to load the next page -->
+<div id="load-more-sentinel" aria-hidden="true"></div>
+
 <!-- ENGINE STATUS SIDEBAR -->
 <aside class="engine-status" id="engine-status" aria-live="polite"></aside>
 
+<!-- A relative `import` drops the query string, so search.js's own
+     `?v=` cache-buster does not reach the module it imports. Mapping the
+     specifier keeps the pair versioned together: a new search.js can never
+     load a stale search-core.js out of a 24h-cached copy. -->
+<script type="importmap">
+  { "imports": { "/static/search-core.js": "/static/search-core.js?v={{version}}" } }
+</script>
 <script type="module" src="static/search.js?v={{version}}"></script>
 
 {{/inline}}

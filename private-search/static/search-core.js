@@ -61,6 +61,41 @@ export function canLoadNextPage({ batchLoading, polling, hasMoreResults }) {
   return !batchLoading && !polling && hasMoreResults;
 }
 
+// True once the end-of-results marker has come within `margin` px of the
+// bottom of the viewport, so the next page starts loading slightly before the
+// user actually reaches the end of the list. `sentinelTop` is the marker's
+// viewport-relative top (i.e. `getBoundingClientRect().top`).
+export function isWithinPreloadRange(sentinelTop, viewportHeight, margin) {
+  return sentinelTop <= viewportHeight + margin;
+}
+
+// Whether to keep loading immediately after a batch lands, rather than waiting
+// for the user to scroll again.
+//
+// This is what makes "scroll for more" work at all in the common case: a user
+// who is already parked at the bottom of the page generates no further scroll
+// events (there is nowhere left to scroll), and an IntersectionObserver whose
+// target is *already* intersecting reports nothing new either. Without an
+// explicit re-check after each batch, the end of page 1 was simply the end of
+// the results.
+//
+// `lastBatchSize === 0` stops the re-check from spinning on a page that keeps
+// coming back empty while the server still reports `hasMore` — that case waits
+// for a real scroll instead.
+export function shouldAutoContinue({
+  lastBatchSize,
+  inPreloadRange,
+  batchLoading,
+  polling,
+  hasMoreResults,
+}) {
+  return (
+    lastBatchSize > 0 &&
+    inPreloadRange &&
+    canLoadNextPage({ batchLoading, polling, hasMoreResults })
+  );
+}
+
 // A small FIFO of not-yet-filled placeholder elements. Replaces matching
 // results to skeletons by a computed numeric id (which could drift out of
 // sync whenever a poll returns a different number of results than were

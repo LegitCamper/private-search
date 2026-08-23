@@ -7,6 +7,8 @@ import {
   getQueryParam,
   skeletonsNeeded,
   canLoadNextPage,
+  isWithinPreloadRange,
+  shouldAutoContinue,
   SkeletonQueue,
 } from "./search-core.js";
 
@@ -113,6 +115,77 @@ test("canLoadNextPage blocks scroll loads while any request is active", () => {
   assert.equal(
     canLoadNextPage({ batchLoading: false, polling: false, hasMoreResults: true }),
     true,
+  );
+});
+
+test("isWithinPreloadRange triggers before the marker actually reaches the viewport", () => {
+  // Viewport is 800px tall, preload margin 500px: anything whose top is at or
+  // above 1300px counts as "the end of the list is coming up".
+  assert.equal(isWithinPreloadRange(1400, 800, 500), false);
+  assert.equal(isWithinPreloadRange(1300, 800, 500), true);
+  assert.equal(isWithinPreloadRange(200, 800, 500), true);
+});
+
+test("isWithinPreloadRange counts a marker scrolled above the viewport", () => {
+  // Negative top = the end of the list is already behind the user; that must
+  // still count, or a page loaded while parked at the bottom never continues.
+  assert.equal(isWithinPreloadRange(-50, 800, 500), true);
+});
+
+test("shouldAutoContinue keeps loading while the end of the list stays in view", () => {
+  assert.equal(
+    shouldAutoContinue({
+      lastBatchSize: 10,
+      inPreloadRange: true,
+      batchLoading: false,
+      polling: false,
+      hasMoreResults: true,
+    }),
+    true,
+  );
+});
+
+test("shouldAutoContinue stops once the results push the end marker out of range", () => {
+  assert.equal(
+    shouldAutoContinue({
+      lastBatchSize: 10,
+      inPreloadRange: false,
+      batchLoading: false,
+      polling: false,
+      hasMoreResults: true,
+    }),
+    false,
+  );
+});
+
+test("shouldAutoContinue refuses to spin on a batch that came back empty", () => {
+  // `hasMore` can stay true while a page yields nothing (e.g. an engine is
+  // failing); re-requesting it on a timer would just hammer the server.
+  assert.equal(
+    shouldAutoContinue({
+      lastBatchSize: 0,
+      inPreloadRange: true,
+      batchLoading: false,
+      polling: false,
+      hasMoreResults: true,
+    }),
+    false,
+  );
+});
+
+test("shouldAutoContinue defers to canLoadNextPage's guards", () => {
+  const base = { lastBatchSize: 10, inPreloadRange: true };
+  assert.equal(
+    shouldAutoContinue({ ...base, batchLoading: true, polling: false, hasMoreResults: true }),
+    false,
+  );
+  assert.equal(
+    shouldAutoContinue({ ...base, batchLoading: false, polling: true, hasMoreResults: true }),
+    false,
+  );
+  assert.equal(
+    shouldAutoContinue({ ...base, batchLoading: false, polling: false, hasMoreResults: false }),
+    false,
   );
 });
 
