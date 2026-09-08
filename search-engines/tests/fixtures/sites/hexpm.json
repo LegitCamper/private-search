@@ -1,0 +1,443 @@
+[
+  {
+    "meta": {
+      "description": "Peace of mind from prototype to production",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "Changelog": "https://phoenix.hexdocs.pm/changelog.html",
+        "GitHub": "https://github.com/phoenixframework/phoenix"
+      }
+    },
+    "name": "phoenix",
+    "html_url": "https://hex.pm/packages/phoenix",
+    "latest_version": "1.8.13",
+    "latest_stable_version": "1.8.13",
+    "downloads": {
+      "all": 154841392,
+      "day": 31729,
+      "recent": 4376537,
+      "week": 418567
+    }
+  },
+  {
+    "meta": {
+      "description": "Distributed PubSub and Presence platform",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "github": "https://github.com/phoenixframework/phoenix_pubsub"
+      }
+    },
+    "name": "phoenix_pubsub",
+    "html_url": "https://hex.pm/packages/phoenix_pubsub",
+    "latest_version": "2.3.0",
+    "latest_stable_version": "2.3.0",
+    "downloads": {
+      "all": 137004004,
+      "day": 30337,
+      "recent": 4157895,
+      "week": 409534
+    }
+  },
+  {
+    "meta": {
+      "description": "Template rendering for Phoenix",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "GitHub": "https://github.com/phoenixframework/phoenix_template"
+      }
+    },
+    "name": "phoenix_template",
+    "html_url": "https://hex.pm/packages/phoenix_template",
+    "latest_version": "1.0.4",
+    "latest_stable_version": "1.0.4",
+    "downloads": {
+      "all": 40425457,
+      "day": 27533,
+      "recent": 3800149,
+      "week": 366276
+    }
+  },
+  {
+    "meta": {
+      "description": "Phoenix view functions for working with HTML templates",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "Changelog": "https://hexdocs.pm/phoenix_html/changelog.html",
+        "GitHub": "https://github.com/phoenixframework/phoenix_html"
+      }
+    },
+    "name": "phoenix_html",
+    "html_url": "https://hex.pm/packages/phoenix_html",
+    "latest_version": "4.3.0",
+    "latest_stable_version": "4.3.0",
+    "downloads": {
+      "all": 88914185,
+      "day": 24462,
+      "recent": 3531540,
+      "week": 326935
+    }
+  },
+  {
+    "meta": {
+      "description": "Rich, real-time user experiences with server-rendered HTML",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "Changelog": "https://phoenix-live-view.hexdocs.pm/changelog.html",
+        "GitHub": "https://github.com/phoenixframework/phoenix_live_view"
+      }
+    },
+    "name": "phoenix_live_view",
+    "html_url": "https://hex.pm/packages/phoenix_live_view",
+    "latest_version": "1.2.11",
+    "latest_stable_version": "1.2.11",
+    "downloads": {
+      "all": 44728960,
+      "day": 23425,
+      "recent": 3410957,
+      "week": 323101
+    }
+  },
+  {
+    "meta": {
+      "description": "Integration between Phoenix & Ecto",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "GitHub": "https://github.com/phoenixframework/phoenix_ecto"
+      }
+    },
+    "name": "phoenix_ecto",
+    "html_url": "https://hex.pm/packages/phoenix_ecto",
+    "latest_version": "4.7.0",
+    "latest_stable_version": "4.7.0",
+    "downloads": {
+      "all": 85539764,
+      "day": 21529,
+      "recent": 3125791,
+      "week": 294442
+    }
+  },
+  {
+    "meta": {
+      "description": "Real-time performance dashboard for Phoenix",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "github": "https://github.com/phoenixframework/phoenix_live_dashboard"
+      }
+    },
+    "name": "phoenix_live_dashboard",
+    "html_url": "https://hex.pm/packages/phoenix_live_dashboard",
+    "latest_version": "0.9.1",
+    "latest_stable_version": "0.9.1",
+    "downloads": {
+      "all": 35551956,
+      "day": 16481,
+      "recent": 2450430,
+      "week": 234441
+    }
+  },
+  {
+    "meta": {
+      "description": "Provides live-reload functionality for Phoenix",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "GitHub": "https://github.com/phoenixframework/phoenix_live_reload"
+      }
+    },
+    "name": "phoenix_live_reload",
+    "html_url": "https://hex.pm/packages/phoenix_live_reload",
+    "latest_version": "1.7.0",
+    "latest_stable_version": "1.7.0",
+    "downloads": {
+      "all": 39783106,
+      "day": 14692,
+      "recent": 1729617,
+      "week": 168644
+    }
+  },
+  {
+    "meta": {
+      "description": "The view layer in Phoenix v1.0-v1.6 apps",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "GitHub": "https://github.com/phoenixframework/phoenix_view"
+      }
+    },
+    "name": "phoenix_view",
+    "html_url": "https://hex.pm/packages/phoenix_view",
+    "latest_version": "2.0.4",
+    "latest_stable_version": "2.0.4",
+    "downloads": {
+      "all": 34805681,
+      "day": 6131,
+      "recent": 1666153,
+      "week": 143293
+    }
+  },
+  {
+    "meta": {
+      "description": "Security-focused static analysis for Elixir & the Phoenix framework",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "links": {
+        "Changelog": "https://github.com/sobelow/sobelow/blob/main/CHANGELOG.md",
+        "GitHub": "https://github.com/sobelow/sobelow"
+      }
+    },
+    "name": "sobelow",
+    "html_url": "https://hex.pm/packages/sobelow",
+    "latest_version": "0.15.0",
+    "latest_stable_version": "0.15.0",
+    "downloads": {
+      "all": 41815347,
+      "day": 9235,
+      "recent": 1336039,
+      "week": 124501
+    }
+  },
+  {
+    "meta": {
+      "description": "OpenTelemetry tracing for the Phoenix Framework",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "links": {
+        "GitHub": "https://github.com/open-telemetry/opentelemetry-erlang-contrib/tree/main/instrumentation/opentelemetry_phoenix",
+        "OpenTelemetry Erlang": "https://github.com/open-telemetry/opentelemetry-erlang",
+        "OpenTelemetry Erlang Contrib": "https://github.com/open-telemetry/opentelemetry-erlang-contrib",
+        "OpenTelemetry.io": "https://opentelemetry.io"
+      }
+    },
+    "name": "opentelemetry_phoenix",
+    "html_url": "https://hex.pm/packages/opentelemetry_phoenix",
+    "latest_version": "2.0.1",
+    "latest_stable_version": "2.0.1",
+    "downloads": {
+      "all": 10460755,
+      "day": 3605,
+      "recent": 1176988,
+      "week": 94658
+    }
+  },
+  {
+    "meta": {
+      "description": "Leverage Open Api Specification 3 (swagger) to document, test, validate and explore your Plug and Phoenix APIs.",
+      "licenses": [
+        "MPL-2.0"
+      ],
+      "links": {
+        "Changelog": "https://hexdocs.pm/open_api_spex/changelog.html",
+        "GitHub": "https://github.com/open-api-spex/open_api_spex"
+      }
+    },
+    "name": "open_api_spex",
+    "html_url": "https://hex.pm/packages/open_api_spex",
+    "latest_version": "3.22.4",
+    "latest_stable_version": "3.22.4",
+    "downloads": {
+      "all": 11777453,
+      "day": 5456,
+      "recent": 1030290,
+      "week": 101038
+    }
+  },
+  {
+    "meta": {
+      "description": "Collection of helpers to generate and manipulate HTML contents",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "GitHub": "https://github.com/phoenixframework/phoenix_html_helpers"
+      }
+    },
+    "name": "phoenix_html_helpers",
+    "html_url": "https://hex.pm/packages/phoenix_html_helpers",
+    "latest_version": "1.0.1",
+    "latest_stable_version": "1.0.1",
+    "downloads": {
+      "all": 6742777,
+      "day": 3796,
+      "recent": 834394,
+      "week": 69888
+    }
+  },
+  {
+    "meta": {
+      "description": "Tidewave for Phoenix",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "links": {
+        "GitHub": "https://github.com/tidewave-ai/tidewave_phoenix",
+        "Tidewave": "https://tidewave.ai/"
+      }
+    },
+    "name": "tidewave",
+    "html_url": "https://hex.pm/packages/tidewave",
+    "latest_version": "0.9.0",
+    "latest_stable_version": "0.9.0",
+    "downloads": {
+      "all": 2009979,
+      "day": 4055,
+      "recent": 655255,
+      "week": 61963
+    }
+  },
+  {
+    "meta": {
+      "description": "Subscription support via Phoenix for Absinthe, the GraphQL implementation for Elixir.",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "Changelog": "https://hexdocs.pm/absinthe_phoenix/changelog.html",
+        "GitHub": "https://github.com/absinthe-graphql/absinthe_phoenix",
+        "Website": "https://absinthe-graphql.org"
+      }
+    },
+    "name": "absinthe_phoenix",
+    "html_url": "https://hex.pm/packages/absinthe_phoenix",
+    "latest_version": "2.0.5",
+    "latest_stable_version": "2.0.5",
+    "downloads": {
+      "all": 11258726,
+      "day": 2038,
+      "recent": 472821,
+      "week": 34323
+    }
+  },
+  {
+    "meta": {
+      "description": "Utilities for integrating Ash and Phoenix",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "Changelog": "https://github.com/ash-project/ash_phoenix/blob/main/CHANGELOG.md",
+        "Discord": "https://discord.gg/HTHRaaVPUc",
+        "Forum": "https://elixirforum.com/c/elixir-framework-forums/ash-framework-forum",
+        "GitHub": "https://github.com/ash-project/ash_phoenix",
+        "REUSE Compliance": "https://api.reuse.software/info/github.com/ash-project/ash_phoenix",
+        "Website": "https://ash-hq.org"
+      }
+    },
+    "name": "ash_phoenix",
+    "html_url": "https://hex.pm/packages/ash_phoenix",
+    "latest_version": "2.3.25",
+    "latest_stable_version": "2.3.25",
+    "downloads": {
+      "all": 1196123,
+      "day": 2118,
+      "recent": 264140,
+      "week": 23901
+    }
+  },
+  {
+    "meta": {
+      "description": "Use Swoosh to easily send emails in your Phoenix project.",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "Changelog": "https://hexdocs.pm/phoenix_swoosh/changelog.html",
+        "GitHub": "https://github.com/swoosh/phoenix_swoosh"
+      }
+    },
+    "name": "phoenix_swoosh",
+    "html_url": "https://hex.pm/packages/phoenix_swoosh",
+    "latest_version": "1.2.1",
+    "latest_stable_version": "1.2.1",
+    "downloads": {
+      "all": 6172685,
+      "day": 848,
+      "recent": 250903,
+      "week": 20886
+    }
+  },
+  {
+    "meta": {
+      "description": "AppSignal's Phoenix instrumentation instruments calls to Phoenix applications to gain performance insights and error reporting",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "GitHub": "https://github.com/appsignal/appsignal-elixir-phoenix"
+      }
+    },
+    "name": "appsignal_phoenix",
+    "html_url": "https://hex.pm/packages/appsignal_phoenix",
+    "latest_version": "2.8.2",
+    "latest_stable_version": "2.8.2",
+    "downloads": {
+      "all": 4828468,
+      "day": 879,
+      "recent": 221210,
+      "week": 18422
+    }
+  },
+  {
+    "meta": {
+      "description": "Phoenix integration for Ash Authentication",
+      "licenses": [
+        "MIT"
+      ],
+      "links": {
+        "Changelog": "https://github.com/team-alembic/ash_authentication_phoenix/blob/main/CHANGELOG.md",
+        "GitHub": "https://github.com/team-alembic/ash_authentication_phoenix",
+        "REUSE Compliance": "https://api.reuse.software/info/github.com/team-alembic/ash_authentication_phoenix",
+        "Source": "https://github.com/team-alembic/ash_authentication_phoenix"
+      }
+    },
+    "name": "ash_authentication_phoenix",
+    "html_url": "https://hex.pm/packages/ash_authentication_phoenix",
+    "latest_version": "3.0.0-rc.10",
+    "latest_stable_version": "2.17.3",
+    "downloads": {
+      "all": 759374,
+      "day": 1459,
+      "recent": 177211,
+      "week": 15702
+    }
+  },
+  {
+    "meta": {
+      "description": "Model Context Protocol (MCP) implementation in Elixir with Phoenix integration",
+      "licenses": [
+        "LGPL-3.0"
+      ],
+      "links": {
+        "Docs": "https://hexdocs.pm/anubis_mcp",
+        "GitHub": "https://github.com/zoedsoupe/anubis-mcp"
+      }
+    },
+    "name": "anubis_mcp",
+    "html_url": "https://hex.pm/packages/anubis_mcp",
+    "latest_version": "2.0.0",
+    "latest_stable_version": "2.0.0",
+    "downloads": {
+      "all": 379256,
+      "day": 943,
+      "recent": 158877,
+      "week": 14477
+    }
+  }
+]

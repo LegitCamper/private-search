@@ -11,8 +11,8 @@ use rocket::{
 use rocket_dyn_templates::{Template, context};
 
 use private_search_engines::{
-    FetchError, ImageEngines, ImageResult, ImageSearchBuilder, SearchBuilder, SearchEngines,
-    SearchResponse, SearchResult, init_db,
+    FetchError, ImageEngines, ImageResult, ImageSearchBuilder, SearchBuilder, SearchResponse,
+    SearchResult, init_db,
 };
 
 mod rate_limit;
@@ -248,7 +248,6 @@ async fn query(
 
     let results = match tab {
         "General" | "general" => SearchBuilder::new(query)
-            .engines([SearchEngines::Brave, SearchEngines::DuckDuckGo])
             .start(start)
             .count(count)
             .search()
@@ -281,7 +280,14 @@ async fn query(
                 log::warn!("all engines cooling down: tab={tab} query={query:?}")
             }
         }
-        api_error(status, "query failed")
+        let message = match &e {
+            FetchError::Cache(_) => "search cache failed",
+            FetchError::AllEnginesFailed => "all search engines failed or timed out",
+            FetchError::AllEnginesCoolingDown => {
+                "all search engines are temporarily paused after recent failures"
+            }
+        };
+        api_error(status, message)
     })?;
 
     log::debug!(

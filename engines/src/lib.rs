@@ -27,7 +27,11 @@
 
 use async_trait::async_trait;
 use search_cache::{CacheableRow, EngineOutcome, EngineSource, MergedCache, Ranker};
-use search_engines::{Brave, DuckDuckGo, EngineInfo, ImageEngine, SearchEngine};
+use search_engines::{
+    ArchWiki, Brave, Codeberg, CratesIo, DockerHub, DuckDuckGo, EngineInfo, GitHub, GitLab, GoPkg,
+    HackerNews, HexPm, ImageEngine, Lobsters, MavenCentral, Mdn, NixPackages, Npm, NuGet,
+    Packagist, PyPi, RubyGems, SearchEngine, StackExchange, Wikipedia,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
@@ -38,7 +42,7 @@ use std::{
 };
 use tokio::sync::OnceCell;
 
-const ENGINE_TIMEOUT: u64 = 3; // seconds
+const ENGINE_TIMEOUT: u64 = 8; // seconds
 const DEFAULT_SEARCH_COUNT: usize = 10;
 const DEFAULT_IMAGE_COUNT: usize = 50;
 /// Hint passed to an engine adapter's own page size — most of ours ignore it
@@ -80,6 +84,11 @@ fn resolve_secs(env_var: &str, default_secs: u64) -> Duration {
 /// via `ENGINE_COOLDOWN_BASE_SECS` disables cooldowns entirely, without a
 /// rebuild — every call to `record_failure` becomes a no-op and
 /// `cooldown_remaining` always reports the engine as usable.
+fn default_engine_timeout() -> Duration {
+    static TIMEOUT: OnceLock<Duration> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| resolve_secs("ENGINE_TIMEOUT_SECS", ENGINE_TIMEOUT))
+}
+
 fn cooldown_base() -> Duration {
     static BASE: OnceLock<Duration> = OnceLock::new();
     *BASE.get_or_init(|| resolve_secs("ENGINE_COOLDOWN_BASE_SECS", 60))
@@ -306,61 +315,127 @@ const DOMAIN_SUBSTRING_MATCH: u32 = 2;
 /// itself isn't about the query, just one page on it happens to mention it.
 const PATH_MATCH: u32 = 1;
 
-/// Ranks a freshly-fetched batch by how closely each result's URL matches
-/// the (non-stopword) query terms — preferring the *site* the query is
-/// about (`rust-lang.org` for "rust") over a page whose URL path merely
-/// mentions the term (`some-blog.example/posts/rust-tips`), and preferring
-/// a real word-boundary domain match over a same-substring false positive
-/// (`trustworthy.com` isn't about "rust" just because it contains the
-/// letters). Runs once, at cache-insertion time, on each new batch — never
-/// re-run over already-persisted rows (see [`search_cache`]'s append-only
-/// merge order).
-pub fn sort_results<T: CacheableRow>(mut results: Vec<T>, query: &str) -> Vec<T> {
+fn query_words(query: &str) -> Vec<String> {
     let stop = ["the", "and", "or", "of", "for", "in", "on", "at"];
-    let words: Vec<String> = query
+    query
         .split_whitespace()
-        .filter(|w| !stop.contains(&w.to_lowercase().as_str()))
-        .map(str::to_lowercase)
+        .map(|word| {
+            word.trim_matches(|character: char| !character.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|word| !word.is_empty() && !stop.contains(&word.as_str()))
+        .collect()
+}
+
+fn url_score(url: &str, words: &[String]) -> u32 {
+    let rest = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let (domain, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let domain = domain.to_lowercase();
+    let path = path.to_lowercase();
+
+    let domain_tokens: Vec<&str> = domain
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
         .collect();
 
-    fn score(url: &str, words: &[String]) -> u32 {
-        let rest = url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://");
-        let (domain, path) = rest.split_once('/').unwrap_or((rest, ""));
-        let domain = domain.to_lowercase();
-        let path = path.to_lowercase();
+    words
+        .iter()
+        .map(|word| {
+            if domain_tokens.contains(&word.as_str()) {
+                DOMAIN_TOKEN_MATCH
+            } else if domain.contains(word.as_str()) {
+                DOMAIN_SUBSTRING_MATCH
+            } else if path.contains(word.as_str()) {
+                PATH_MATCH
+            } else {
+                0
+            }
+        })
+        .sum()
+}
 
-        let domain_tokens: Vec<&str> = domain
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        words
-            .iter()
-            .map(|w| {
-                if domain_tokens.contains(&w.as_str()) {
-                    DOMAIN_TOKEN_MATCH
-                } else if domain.contains(w.as_str()) {
-                    DOMAIN_SUBSTRING_MATCH
-                } else if path.contains(w.as_str()) {
-                    PATH_MATCH
-                } else {
-                    0
-                }
-            })
-            .sum()
-    }
-
-    results.sort_by_cached_key(|r| std::cmp::Reverse(score(r.url(), &words)));
+/// Ranks a freshly-fetched batch by how closely each result's URL matches
+/// the (non-stopword) query terms. This generic URL-only form remains public
+/// for consumers with their own row type; the built-in text ranker below adds
+/// title/description and programmer-site signals as well.
+pub fn sort_results<T: CacheableRow>(mut results: Vec<T>, query: &str) -> Vec<T> {
+    let words = query_words(query);
+    results.sort_by_cached_key(|result| std::cmp::Reverse(url_score(result.url(), &words)));
     results
+}
+
+fn programmer_domain_boost(url: &str) -> u32 {
+    let domain = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+
+    match domain.as_str() {
+        "github.com" => 30,
+        "gitlab.com" | "codeberg.org" => 18,
+        "stackoverflow.com" => 20,
+        "crates.io"
+        | "www.npmjs.com"
+        | "pypi.org"
+        | "rubygems.org"
+        | "packagist.org"
+        | "central.sonatype.com"
+        | "www.nuget.org"
+        | "hex.pm"
+        | "pkg.go.dev" => 8,
+        _ => 0,
+    }
+}
+
+fn cached_result_score(result: &CachedResult, query: &str, words: &[String]) -> u32 {
+    let title = result.title.to_lowercase();
+    let description = result.description.to_lowercase();
+    let title_tokens: Vec<&str> = title
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    let terminal_path = result
+        .url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let mut score = url_score(&result.url, words) * 10 + programmer_domain_boost(&result.url);
+    if title.trim() == query.trim().to_lowercase() {
+        score += 20;
+    }
+    for word in words {
+        if title_tokens.contains(&word.as_str()) {
+            score += 6;
+        } else if title.contains(word) {
+            score += 3;
+        }
+        if description.contains(word) {
+            score += 1;
+        }
+        if terminal_path.eq_ignore_ascii_case(word) {
+            score += 5;
+        }
+    }
+    score
 }
 
 struct DomainWordRanker;
 
 impl Ranker<CachedResult> for DomainWordRanker {
-    fn rank(&self, query: &str, batch: Vec<CachedResult>) -> Vec<CachedResult> {
-        sort_results(batch, query)
+    fn rank(&self, query: &str, mut batch: Vec<CachedResult>) -> Vec<CachedResult> {
+        let words = query_words(query);
+        batch.sort_by_cached_key(|result| {
+            std::cmp::Reverse(cached_result_score(result, query, &words))
+        });
+        batch
     }
 }
 
@@ -375,16 +450,24 @@ impl Ranker<CachedImage> for UrlSortRanker {
     }
 }
 
-struct BraveTextSource;
+/// Adapts any [`SearchEngine`] into the cache layer's [`EngineSource`].
+///
+/// Was one hand-written source struct per engine; with twenty-odd adapters
+/// that became twenty identical copies of the same six-line mapping, so the
+/// conversion lives here once instead.
+struct TextSource<E>(E);
 
 #[async_trait]
-impl EngineSource<CachedResult> for BraveTextSource {
+impl<E> EngineSource<CachedResult> for TextSource<E>
+where
+    E: SearchEngine + Sync + 'static,
+{
     fn name(&self) -> &'static str {
-        Brave.name()
+        self.0.name()
     }
 
     async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<CachedResult>, String> {
-        Brave
+        self.0
             .search_results(query, start, ENGINE_PAGE_HINT)
             .await
             .map(|rows| {
@@ -400,41 +483,20 @@ impl EngineSource<CachedResult> for BraveTextSource {
     }
 }
 
-struct DdgTextSource;
+/// [`TextSource`]'s counterpart for image engines.
+struct ImageSource<E>(E);
 
 #[async_trait]
-impl EngineSource<CachedResult> for DdgTextSource {
+impl<E> EngineSource<CachedImage> for ImageSource<E>
+where
+    E: ImageEngine + Sync + 'static,
+{
     fn name(&self) -> &'static str {
-        DuckDuckGo.name()
-    }
-
-    async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<CachedResult>, String> {
-        DuckDuckGo
-            .search_results(query, start, ENGINE_PAGE_HINT)
-            .await
-            .map(|rows| {
-                rows.into_iter()
-                    .map(|r| CachedResult {
-                        url: r.url,
-                        title: r.title,
-                        description: r.description,
-                    })
-                    .collect()
-            })
-            .map_err(|e| e.to_string())
-    }
-}
-
-struct BraveImageSource;
-
-#[async_trait]
-impl EngineSource<CachedImage> for BraveImageSource {
-    fn name(&self) -> &'static str {
-        Brave.name()
+        self.0.name()
     }
 
     async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<CachedImage>, String> {
-        Brave
+        self.0
             .search_images(query, start, ENGINE_PAGE_HINT)
             .await
             .map(|rows| {
@@ -453,25 +515,151 @@ impl EngineSource<CachedImage> for BraveImageSource {
 pub enum SearchEngines {
     Brave,
     DuckDuckGo,
+    GitHub,
+    GitLab,
+    Codeberg,
+    StackExchange,
+    HackerNews,
+    Lobsters,
+    Wikipedia,
+    ArchWiki,
+    Mdn,
+    CratesIo,
+    Npm,
+    PyPi,
+    RubyGems,
+    Packagist,
+    MavenCentral,
+    NuGet,
+    HexPm,
+    DockerHub,
+    NixPackages,
+    GoPkg,
+}
+
+fn looks_like_stackexchange_query(query: &str) -> bool {
+    const HINTS: &[&str] = &[
+        "how",
+        "why",
+        "what",
+        "error",
+        "exception",
+        "panic",
+        "failed",
+        "failure",
+        "cannot",
+        "can't",
+        "doesn't",
+        "compile",
+        "compiler",
+        "stacktrace",
+        "traceback",
+        "not working",
+    ];
+
+    let query = query.to_lowercase();
+    query.contains('?')
+        || HINTS.iter().any(|hint| {
+            query == *hint
+                || query.starts_with(&format!("{hint} "))
+                || query.ends_with(&format!(" {hint}"))
+                || query.contains(&format!(" {hint} "))
+        })
 }
 
 impl SearchEngines {
-    /// Every known text-search engine; the default set for [`SearchBuilder`].
+    /// Every known text-search engine, including quota-sensitive sources.
     pub fn all() -> Vec<Self> {
-        vec![Self::Brave, Self::DuckDuckGo]
+        vec![
+            Self::Brave,
+            Self::DuckDuckGo,
+            Self::GitHub,
+            Self::GitLab,
+            Self::Codeberg,
+            Self::StackExchange,
+            Self::HackerNews,
+            Self::Lobsters,
+            Self::Wikipedia,
+            Self::ArchWiki,
+            Self::Mdn,
+            Self::CratesIo,
+            Self::Npm,
+            Self::PyPi,
+            Self::RubyGems,
+            Self::Packagist,
+            Self::MavenCentral,
+            Self::NuGet,
+            Self::HexPm,
+            Self::DockerHub,
+            Self::NixPackages,
+            Self::GoPkg,
+        ]
+    }
+
+    /// Engines used when callers do not choose a set explicitly. GitHub and
+    /// the package registries stay enabled for broad queries (so `pangolin`
+    /// can find its repository), while Stack Exchange's unusually small
+    /// unauthenticated daily quota is reserved for question/error-shaped
+    /// searches where it is most likely to add value.
+    pub fn defaults_for_query(query: &str) -> Vec<Self> {
+        let mut engines = Self::all();
+        if !looks_like_stackexchange_query(query) {
+            engines.retain(|engine| *engine != Self::StackExchange);
+        }
+        engines
     }
 
     fn name(self) -> &'static str {
         match self {
             Self::Brave => Brave.name(),
             Self::DuckDuckGo => DuckDuckGo.name(),
+            Self::GitHub => GitHub.name(),
+            Self::GitLab => GitLab.name(),
+            Self::Codeberg => Codeberg.name(),
+            Self::StackExchange => StackExchange.name(),
+            Self::HackerNews => HackerNews.name(),
+            Self::Lobsters => Lobsters.name(),
+            Self::Wikipedia => Wikipedia.name(),
+            Self::ArchWiki => ArchWiki.name(),
+            Self::Mdn => Mdn.name(),
+            Self::CratesIo => CratesIo.name(),
+            Self::Npm => Npm.name(),
+            Self::PyPi => PyPi.name(),
+            Self::RubyGems => RubyGems.name(),
+            Self::Packagist => Packagist.name(),
+            Self::MavenCentral => MavenCentral.name(),
+            Self::NuGet => NuGet.name(),
+            Self::HexPm => HexPm.name(),
+            Self::DockerHub => DockerHub.name(),
+            Self::NixPackages => NixPackages.name(),
+            Self::GoPkg => GoPkg.name(),
         }
     }
 
     fn source(self) -> Arc<dyn EngineSource<CachedResult>> {
         match self {
-            Self::Brave => Arc::new(BraveTextSource),
-            Self::DuckDuckGo => Arc::new(DdgTextSource),
+            Self::Brave => Arc::new(TextSource(Brave)),
+            Self::DuckDuckGo => Arc::new(TextSource(DuckDuckGo)),
+            Self::GitHub => Arc::new(TextSource(GitHub)),
+            Self::GitLab => Arc::new(TextSource(GitLab)),
+            Self::Codeberg => Arc::new(TextSource(Codeberg)),
+            Self::StackExchange => Arc::new(TextSource(StackExchange)),
+            Self::HackerNews => Arc::new(TextSource(HackerNews)),
+            Self::Lobsters => Arc::new(TextSource(Lobsters)),
+            Self::Wikipedia => Arc::new(TextSource(Wikipedia)),
+            Self::ArchWiki => Arc::new(TextSource(ArchWiki)),
+            Self::Mdn => Arc::new(TextSource(Mdn)),
+            Self::CratesIo => Arc::new(TextSource(CratesIo)),
+            Self::Npm => Arc::new(TextSource(Npm)),
+            Self::PyPi => Arc::new(TextSource(PyPi)),
+            Self::RubyGems => Arc::new(TextSource(RubyGems)),
+            Self::Packagist => Arc::new(TextSource(Packagist)),
+            Self::MavenCentral => Arc::new(TextSource(MavenCentral)),
+            Self::NuGet => Arc::new(TextSource(NuGet)),
+            Self::HexPm => Arc::new(TextSource(HexPm)),
+            Self::DockerHub => Arc::new(TextSource(DockerHub)),
+            Self::NixPackages => Arc::new(TextSource(NixPackages)),
+            Self::GoPkg => Arc::new(TextSource(GoPkg)),
         }
     }
 }
@@ -495,7 +683,7 @@ impl ImageEngines {
 
     fn source(self) -> Arc<dyn EngineSource<CachedImage>> {
         match self {
-            Self::Brave => Arc::new(BraveImageSource),
+            Self::Brave => Arc::new(ImageSource(Brave)),
         }
     }
 }
@@ -607,7 +795,7 @@ fn build_reports<E: Copy + PartialEq>(
 
 /// Builds and runs a text search across one or more engines.
 ///
-/// Defaults: every engine in [`SearchEngines::all`], 10 results from 0, 3s timeout.
+/// Defaults: the quota-aware engine set, 10 results from 0, and an 8s timeout (configurable with `ENGINE_TIMEOUT_SECS`).
 pub struct SearchBuilder {
     query: String,
     engines: Vec<SearchEngines>,
@@ -623,7 +811,7 @@ impl SearchBuilder {
             engines: Vec::new(),
             start: 0,
             count: DEFAULT_SEARCH_COUNT,
-            timeout: Duration::from_secs(ENGINE_TIMEOUT),
+            timeout: default_engine_timeout(),
         }
     }
 
@@ -655,7 +843,7 @@ impl SearchBuilder {
         self
     }
 
-    /// Per-engine, per-round timeout. Default 3 seconds.
+    /// Per-engine, per-round timeout. Default 8 seconds.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -665,7 +853,7 @@ impl SearchBuilder {
     /// newly-discovered results by [`sort_results`].
     pub async fn search(self) -> Result<SearchResponse<SearchResult>, FetchError> {
         let engines = if self.engines.is_empty() {
-            SearchEngines::all()
+            SearchEngines::defaults_for_query(&self.query)
         } else {
             self.engines
         };
@@ -724,7 +912,7 @@ impl SearchBuilder {
 
 /// Builds and runs an image search across one or more engines.
 ///
-/// Defaults: every engine in [`ImageEngines::all`], 50 results from 0, 3s timeout.
+/// Defaults: every image engine, 50 results from 0, and an 8s timeout (configurable with `ENGINE_TIMEOUT_SECS`).
 pub struct ImageSearchBuilder {
     query: String,
     engines: Vec<ImageEngines>,
@@ -740,7 +928,7 @@ impl ImageSearchBuilder {
             engines: Vec::new(),
             start: 0,
             count: DEFAULT_IMAGE_COUNT,
-            timeout: Duration::from_secs(ENGINE_TIMEOUT),
+            timeout: default_engine_timeout(),
         }
     }
 
@@ -773,7 +961,7 @@ impl ImageSearchBuilder {
         self
     }
 
-    /// Per-engine, per-round timeout. Default 3 seconds.
+    /// Per-engine, per-round timeout. Default 8 seconds.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -841,6 +1029,38 @@ impl ImageSearchBuilder {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn all_text_engines_have_unique_names() {
+        let engines = SearchEngines::all();
+        assert_eq!(engines.len(), 22);
+
+        let mut names: Vec<_> = engines.iter().map(|engine| engine.name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), engines.len());
+    }
+
+    #[test]
+    fn broad_defaults_keep_github_but_reserve_stackexchange_quota() {
+        let engines = SearchEngines::defaults_for_query("pangolin");
+        assert!(engines.contains(&SearchEngines::GitHub));
+        assert!(!engines.contains(&SearchEngines::StackExchange));
+    }
+
+    #[test]
+    fn question_shaped_defaults_include_stackexchange() {
+        for query in [
+            "why does rust borrow fail?",
+            "python traceback",
+            "compiler error E0308",
+        ] {
+            assert!(
+                SearchEngines::defaults_for_query(query).contains(&SearchEngines::StackExchange),
+                "Stack Exchange should run for {query:?}"
+            );
+        }
+    }
 
     // The cooldown registry is process-global, and Rust runs `#[test]`s
     // concurrently in one process, so every test below uses its own
@@ -1005,6 +1225,32 @@ mod test {
 
         assert_eq!(ranked[0].url, "https://some-blog.example/posts/rust-tips");
         assert_eq!(ranked[1].url, "https://totally-unrelated.example/other");
+    }
+
+    #[test]
+    fn built_in_ranker_surfaces_a_matching_github_repository() {
+        let ranked = DomainWordRanker.rank(
+            "pangolin",
+            vec![
+                CachedResult {
+                    url: "https://en.wikipedia.org/wiki/Pangolin".into(),
+                    title: "Pangolin".into(),
+                    description: "A mammal".into(),
+                },
+                CachedResult {
+                    url: "https://pkg.go.dev/github.com/example/pangolin/logging".into(),
+                    title: "github.com/example/pangolin/logging".into(),
+                    description: "Go logging package".into(),
+                },
+                CachedResult {
+                    url: "https://github.com/fosrl/pangolin".into(),
+                    title: "fosrl/pangolin".into(),
+                    description: "Networking platform".into(),
+                },
+            ],
+        );
+
+        assert_eq!(ranked[0].url, "https://github.com/fosrl/pangolin");
     }
 
     /// Regression guard for "encoding/JSON support": unicode titles/

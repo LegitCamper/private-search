@@ -19,21 +19,28 @@ use std::time::Duration;
 
 mod brave;
 mod duckduckgo;
+pub mod sites;
 
 pub use brave::Brave;
 pub use duckduckgo::DuckDuckGo;
+pub use sites::*;
 
 /// One raw text-search hit, straight off an engine's results page — no
 /// ranking, dedup, or engine attribution applied yet.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` is derived for the adapters' tests, which compare a parsed
+/// batch against an expected one; it is a plain field-wise comparison and
+/// carries no dedup semantics (the cache layer dedups on `url` alone).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawResult {
     pub url: String,
     pub title: String,
     pub description: String,
 }
 
-/// One raw image-search hit, straight off an engine's results page.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One raw image-search hit, straight off an engine's results page. See
+/// [`RawResult`] on why `PartialEq` is derived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawImage {
     pub url: String,
     pub title: String,
@@ -169,6 +176,8 @@ fn browser_client() -> Client {
                     "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0",
                 )
                 .default_headers(headers)
+                .gzip(true)
+                .brotli(true)
                 .build()
                 .expect("failed to build browser client")
         })

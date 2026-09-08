@@ -1,0 +1,187 @@
+{
+    "count": 292251,
+    "next": "https://hub.docker.com/v2/search/repositories/?page=2&page_size=20&query=nginx",
+    "previous": "",
+    "results": [
+        {
+            "repo_name": "nginx",
+            "short_description": "Official build of Nginx.",
+            "star_count": 21369,
+            "pull_count": 13334094247,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": true
+        },
+        {
+            "repo_name": "nginx/nginx-ingress",
+            "short_description": "NGINX and  NGINX Plus Ingress Controllers for Kubernetes",
+            "star_count": 122,
+            "pull_count": 1087098458,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "nginx/nginx-prometheus-exporter",
+            "short_description": "NGINX Prometheus Exporter for NGINX and NGINX Plus",
+            "star_count": 52,
+            "pull_count": 90526172,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "nginx/nginx-ingress-operator",
+            "short_description": "NGINX Ingress Operator for NGINX and NGINX Plus Ingress Controllers. Based on the Helm chart for NGI",
+            "star_count": 4,
+            "pull_count": 1294490,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "nginx/nginxaas-loadbalancer-kubernetes",
+            "short_description": "",
+            "star_count": 1,
+            "pull_count": 16206,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "bitnamicharts/nginx",
+            "short_description": "Bitnami Helm chart for NGINX Open Source",
+            "star_count": 4,
+            "pull_count": 10334268,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "ubuntu/nginx",
+            "short_description": "Nginx, a high-performance reverse proxy & web server. Long-term tracks maintained by Canonical.",
+            "star_count": 143,
+            "pull_count": 13002314,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "kasmweb/nginx",
+            "short_description": "An Nginx image based off nginx:alpine and includes logrotate.",
+            "star_count": 9,
+            "pull_count": 2725552,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "rancher/nginx",
+            "short_description": "",
+            "star_count": 4,
+            "pull_count": 23304720,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "linuxserver/nginx",
+            "short_description": "An Nginx container, brought to you by LinuxServer.io. ",
+            "star_count": 236,
+            "pull_count": 71607847,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "dtagdevsec/nginx",
+            "short_description": "T-Pot Nginx",
+            "star_count": 0,
+            "pull_count": 1590359,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "paketobuildpacks/nginx",
+            "short_description": "",
+            "star_count": 0,
+            "pull_count": 5751776,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "vmware/nginx",
+            "short_description": "",
+            "star_count": 3,
+            "pull_count": 112016,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "cleanstart/nginx",
+            "short_description": "Secure by Design, Built for Speed, Hardened Container Images on a minimal base CleanStart OS.",
+            "star_count": 0,
+            "pull_count": 103027,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "activestate/nginx",
+            "short_description": "ActiveState's customizable, low-to-no vulnerability container image for Nginx.",
+            "star_count": 0,
+            "pull_count": 14095,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "gluufederation/nginx",
+            "short_description": " A customized NGINX image containing a consul-template and an NGINX server.",
+            "star_count": 1,
+            "pull_count": 153794,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "antrea/nginx",
+            "short_description": "Nginx server used for Antrea e2e testing",
+            "star_count": 0,
+            "pull_count": 117594,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "intel/nginx",
+            "short_description": "",
+            "star_count": 0,
+            "pull_count": 41657,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "docksal/nginx",
+            "short_description": "Nginx service image for Docksal",
+            "star_count": 1,
+            "pull_count": 33194,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        },
+        {
+            "repo_name": "geokrety/nginx",
+            "short_description": "Our customized nginx image",
+            "star_count": 0,
+            "pull_count": 25758,
+            "repo_owner": "",
+            "is_automated": false,
+            "is_official": false
+        }
+    ]
+}

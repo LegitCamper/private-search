@@ -7,6 +7,7 @@ import {
   canLoadNextPage,
   isWithinPreloadRange,
   shouldAutoContinue,
+  retryDelayMs,
   SkeletonQueue,
 } from "./search-core.js";
 
@@ -165,9 +166,10 @@ async function pollResults(query) {
     if (!res.ok) {
       const message = await describeError(res);
       onPollFailure(message);
-      // A 429 means we're rate limited — back off longer than the normal
-      // retry interval instead of hammering the server further.
-      setTimeout(() => pollResults(query), res.status === 429 ? 2000 : 1000);
+      setTimeout(
+        () => pollResults(query),
+        retryDelayMs(res.status, consecutiveFailures),
+      );
       return;
     }
 
@@ -176,7 +178,10 @@ async function pollResults(query) {
       data = await res.json();
     } catch (err) {
       onPollFailure("bad response");
-      setTimeout(() => pollResults(query), 1000);
+      setTimeout(
+        () => pollResults(query),
+        retryDelayMs(0, consecutiveFailures),
+      );
       return;
     }
 
@@ -213,7 +218,10 @@ async function pollResults(query) {
     }
   } catch (err) {
     onPollFailure("network error");
-    setTimeout(() => pollResults(query), 1000);
+    setTimeout(
+      () => pollResults(query),
+      retryDelayMs(0, consecutiveFailures),
+    );
   }
 }
 

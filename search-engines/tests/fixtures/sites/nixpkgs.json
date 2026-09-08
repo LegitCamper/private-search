@@ -1,0 +1,553 @@
+{
+  "hits": {
+    "hits": [
+      {
+        "_source": {
+          "package_attr_name": "python313FreeThreading",
+          "package_pname": "python3",
+          "package_pversion": "3.13.15",
+          "package_programs": [
+            "python3.13t",
+            "python3.13t-config",
+            "pydoc3",
+            "python3-config",
+            "python-config",
+            "python3.13",
+            "idle3",
+            "python",
+            "pydoc3.13",
+            "python3.13-config",
+            "python3",
+            "idle3.13",
+            "idle",
+            "pydoc"
+          ],
+          "package_description": "High-level dynamically-typed programming language",
+          "package_longDescription": "<rendered-html><p>Python is a remarkably powerful dynamic programming language that is\nused in a wide variety of application domains. Some of its key\ndistinguishing features include: clear, readable syntax; strong\nintrospection capabilities; intuitive object orientation; natural\nexpression of procedural code; full modularity, supporting hierarchical\npackages; exception-based error handling; and very high level dynamic\ndata types.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://www.python.org"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "mopidyPackages.python",
+          "package_pname": "python3",
+          "package_pversion": "3.14.7",
+          "package_programs": [
+            "python3.14-config",
+            "idle3",
+            "idle3.14",
+            "idle",
+            "python3",
+            "pydoc3.14",
+            "python3.14",
+            "python-config",
+            "python3-config",
+            "pydoc3",
+            "python",
+            "pydoc"
+          ],
+          "package_description": "High-level dynamically-typed programming language",
+          "package_longDescription": "<rendered-html><p>Python is a remarkably powerful dynamic programming language that is\nused in a wide variety of application domains. Some of its key\ndistinguishing features include: clear, readable syntax; strong\nintrospection capabilities; intuitive object orientation; natural\nexpression of procedural code; full modularity, supporting hierarchical\npackages; exception-based error handling; and very high level dynamic\ndata types.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://www.python.org"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python3Minimal",
+          "package_pname": "python3-minimal",
+          "package_pversion": "3.14.7",
+          "package_programs": [
+            "python",
+            "pydoc3",
+            "pydoc3.14",
+            "python3.14",
+            "python3",
+            "pydoc"
+          ],
+          "package_description": "High-level dynamically-typed programming language",
+          "package_longDescription": "<rendered-html><p>Python is a remarkably powerful dynamic programming language that is\nused in a wide variety of application domains. Some of its key\ndistinguishing features include: clear, readable syntax; strong\nintrospection capabilities; intuitive object orientation; natural\nexpression of procedural code; full modularity, supporting hierarchical\npackages; exception-based error handling; and very high level dynamic\ndata types.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://www.python.org"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "graalvmPackages.graalpy",
+          "package_pname": "graalpy",
+          "package_pversion": "25.2.4",
+          "package_programs": [
+            "python",
+            "graalpy-config",
+            "python3",
+            "graalpy"
+          ],
+          "package_description": "High-Performance Polyglot VM (Product: graalpy)",
+          "package_longDescription": null,
+          "package_homepage": [
+            "https://www.graalvm.org/"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python315FreeThreading",
+          "package_pname": "python3",
+          "package_pversion": "3.15.0rc1",
+          "package_programs": [
+            "python-config",
+            "python3.15t-config",
+            "idle3",
+            "pydoc3",
+            "idle",
+            "python3.15t",
+            "idle3.15",
+            "python3.15",
+            "pydoc3.15",
+            "pydoc",
+            "python3.15-config",
+            "python3",
+            "python",
+            "python3-config"
+          ],
+          "package_description": "High-level dynamically-typed programming language",
+          "package_longDescription": "<rendered-html><p>Python is a remarkably powerful dynamic programming language that is\nused in a wide variety of application domains. Some of its key\ndistinguishing features include: clear, readable syntax; strong\nintrospection capabilities; intuitive object orientation; natural\nexpression of procedural code; full modularity, supporting hierarchical\npackages; exception-based error handling; and very high level dynamic\ndata types.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://www.python.org"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python312",
+          "package_pname": "python3",
+          "package_pversion": "3.12.14",
+          "package_programs": [
+            "2to3-3.12",
+            "pydoc3.12",
+            "python3.12-config",
+            "idle3.12",
+            "python",
+            "pydoc3",
+            "2to3",
+            "python3-config",
+            "python-config",
+            "python3.12",
+            "idle3",
+            "idle",
+            "python3",
+            "pydoc"
+          ],
+          "package_description": "High-level dynamically-typed programming language",
+          "package_longDescription": "<rendered-html><p>Python is a remarkably powerful dynamic programming language that is\nused in a wide variety of application domains. Some of its key\ndistinguishing features include: clear, readable syntax; strong\nintrospection capabilities; intuitive object orientation; natural\nexpression of procedural code; full modularity, supporting hierarchical\npackages; exception-based error handling; and very high level dynamic\ndata types.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://www.python.org"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python314FreeThreading",
+          "package_pname": "python3",
+          "package_pversion": "3.14.7",
+          "package_programs": [
+            "idle",
+            "python3",
+            "pydoc",
+            "idle3.14",
+            "python3.14",
+            "pydoc3",
+            "python3.14t",
+            "idle3",
+            "pydoc3.14",
+            "python",
+            "python3.14t-config",
+            "python3.14-config",
+            "python3-config",
+            "python-config"
+          ],
+          "package_description": "High-level dynamically-typed programming language",
+          "package_longDescription": "<rendered-html><p>Python is a remarkably powerful dynamic programming language that is\nused in a wide variety of application domains. Some of its key\ndistinguishing features include: clear, readable syntax; strong\nintrospection capabilities; intuitive object orientation; natural\nexpression of procedural code; full modularity, supporting hierarchical\npackages; exception-based error handling; and very high level dynamic\ndata types.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://www.python.org"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python311",
+          "package_pname": "python3",
+          "package_pversion": "3.11.16",
+          "package_programs": [
+            "pydoc",
+            "2to3",
+            "python3-config",
+            "2to3-3.11",
+            "python",
+            "python-config",
+            "python3.11-config",
+            "pydoc3",
+            "idle3.11",
+            "python3.11",
+            "pydoc3.11",
+            "idle",
+            "idle3",
+            "python3"
+          ],
+          "package_description": "High-level dynamically-typed programming language",
+          "package_longDescription": "<rendered-html><p>Python is a remarkably powerful dynamic programming language that is\nused in a wide variety of application domains. Some of its key\ndistinguishing features include: clear, readable syntax; strong\nintrospection capabilities; intuitive object orientation; natural\nexpression of procedural code; full modularity, supporting hierarchical\npackages; exception-based error handling; and very high level dynamic\ndata types.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://www.python.org"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "ihaskell",
+          "package_pname": "ihaskell-with-packages",
+          "package_pversion": "",
+          "package_programs": [
+            "jupyter-migrate",
+            "ghci",
+            "pydoc",
+            "jupyter-notebook",
+            "jupyter-console",
+            "mistune",
+            "jlpm",
+            "jupyter-events",
+            "ghc-9.10.3",
+            "python3",
+            "pydoc3",
+            "jupyter-labextension",
+            "wsdump",
+            "jsonpointer",
+            "hsc2hs-ghc-9.10.3",
+            "ghc-lib-parser-ex-build-tool",
+            "python3.14-config",
+            "jsonschema",
+            "jupyter",
+            "jupyter-builder",
+            "runhaskell-9.10.3",
+            "normalizer",
+            "idle",
+            "ihaskell",
+            "hsc2hs",
+            "jupyter-server",
+            "hp2ps-ghc-9.10.3",
+            "haddock-ghc-9.10.3",
+            "ghc",
+            "python",
+            "ipython3",
+            "runghc",
+            "ghc-pkg-9.10.3",
+            "idle3",
+            "runghc-9.10.3",
+            "pygmentize",
+            "python3-config",
+            "jupyter-dejavu",
+            "pyjson5",
+            "runhaskell",
+            "jupyter-trust",
+            "jupyter-execute",
+            "python-config",
+            "ihaskell-notebook",
+            "jupyter-troubleshoot",
+            "ipython",
+            "jupyter-lab",
+            "jupyter-run",
+            "haddock",
+            "jupyter-labhub",
+            "pybabel",
+            "ghci-9.10.3",
+            "hpc-ghc-9.10.3",
+            "cpphs",
+            "cffi-gen-src",
+            "hp2ps",
+            "HsColour",
+            "send2trash",
+            "pydoc3.14",
+            "httpx",
+            "jupyter-nbconvert",
+            "hpc",
+            "jsonpath_ng",
+            "hlint",
+            "jupyter-kernel",
+            "idle3.14",
+            "ghc-pkg",
+            "idna",
+            "jupyter-kernelspec",
+            "python3.14"
+          ],
+          "package_description": null,
+          "package_longDescription": null,
+          "package_homepage": []
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "jupyter",
+          "package_pname": "jupyter",
+          "package_pversion": "7.6.2",
+          "package_programs": [
+            "jupyter-labhub",
+            "jsonpath_ng",
+            "python",
+            "python3",
+            "python3.14",
+            "python3.14-config",
+            "jupyter-labextension",
+            "jupyter-builder",
+            "pydoc3",
+            "ipython3",
+            "jupyter-events",
+            "ipython",
+            "idle3",
+            "jupyter-migrate",
+            "pyjson5",
+            "pydoc",
+            "mistune",
+            "jupyter-notebook",
+            "jupyter",
+            "jsonschema",
+            "jupyter-run",
+            "jsonpointer",
+            "wsdump",
+            "pybabel",
+            "pygmentize",
+            "jupyter-nbconvert",
+            "jupyter-dejavu",
+            "jlpm",
+            "idna",
+            "httpx",
+            "idle3.14",
+            "jupyter-trust",
+            "jupyter-server",
+            "normalizer",
+            "python-config",
+            "jupyter-troubleshoot",
+            "jupyter-lab",
+            "jupyter-kernelspec",
+            "jupyter-execute",
+            "idle",
+            "pydoc3.14",
+            "cffi-gen-src",
+            "jupyter-kernel",
+            "send2trash",
+            "python3-config"
+          ],
+          "package_description": "Web-based notebook environment for interactive computing",
+          "package_longDescription": null,
+          "package_homepage": [
+            "https://github.com/jupyter/notebook"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python313",
+          "package_pname": "python3",
+          "package_pversion": "3.13.15",
+          "package_programs": [
+            "python3-config",
+            "pydoc3.13",
+            "idle3.13",
+            "python-config",
+            "pydoc",
+            "idle",
+            "idle3",
+            "pydoc3",
+            "python3.13-config",
+            "python3",
+            "python3.13",
+            "python"
+          ],
+          "package_description": "High-level dynamically-typed programming language",
+          "package_longDescription": "<rendered-html><p>Python is a remarkably powerful dynamic programming language that is\nused in a wide variety of application domains. Some of its key\ndistinguishing features include: clear, readable syntax; strong\nintrospection capabilities; intuitive object orientation; natural\nexpression of procedural code; full modularity, supporting hierarchical\npackages; exception-based error handling; and very high level dynamic\ndata types.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://www.python.org"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python315",
+          "package_pname": "python3",
+          "package_pversion": "3.15.0rc1",
+          "package_programs": [
+            "python3.15",
+            "python3-config",
+            "pydoc3.15",
+            "idle3.15",
+            "idle3",
+            "python",
+            "idle",
+            "python3.15-config",
+            "python3",
+            "pydoc",
+            "python-config",
+            "pydoc3"
+          ],
+          "package_description": "High-level dynamically-typed programming language",
+          "package_longDescription": "<rendered-html><p>Python is a remarkably powerful dynamic programming language that is\nused in a wide variety of application domains. Some of its key\ndistinguishing features include: clear, readable syntax; strong\nintrospection capabilities; intuitive object orientation; natural\nexpression of procedural code; full modularity, supporting hierarchical\npackages; exception-based error handling; and very high level dynamic\ndata types.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://www.python.org"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "jupyter-all",
+          "package_pname": "jupyter",
+          "package_pversion": "7.6.2",
+          "package_programs": [
+            "jupyter-execute",
+            "pydoc3.14",
+            "send2trash",
+            "jupyter-trust",
+            "jupyter-server",
+            "wsdump",
+            "pygmentize",
+            "pydoc3",
+            "jupyter-run",
+            "jupyter-lab",
+            "jupyter-dejavu",
+            "python",
+            "jsonschema",
+            "jlpm",
+            "jupyter-kernel",
+            "python-config",
+            "idle",
+            "httpx",
+            "cffi-gen-src",
+            "python3-config",
+            "ipython",
+            "jupyter",
+            "mistune",
+            "jupyter-builder",
+            "pybabel",
+            "jupyter-events",
+            "ipython3",
+            "jupyter-labextension",
+            "jsonpointer",
+            "idle3.14",
+            "jsonpath_ng",
+            "jupyter-nbconvert",
+            "pyjson5",
+            "jupyter-troubleshoot",
+            "python3.14-config",
+            "pydoc",
+            "idna",
+            "jupyter-kernelspec",
+            "jupyter-labhub",
+            "jupyter-migrate",
+            "jupyter-notebook",
+            "python3.14",
+            "normalizer",
+            "python3",
+            "idle3"
+          ],
+          "package_description": "Web-based notebook environment for interactive computing",
+          "package_longDescription": null,
+          "package_homepage": [
+            "https://github.com/jupyter/notebook"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "texlivePackages.python",
+          "package_pname": "python",
+          "package_pversion": "0.22",
+          "package_programs": [],
+          "package_description": "Embed Python code in LaTeX",
+          "package_longDescription": "<rendered-html><p>This package cannot be installed or used directly. Please use\n<code>texlive.withPackages (ps: [ ps.python ])</code>.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://ctan.org/pkg/python"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "emacsPackages.python",
+          "package_pname": "python",
+          "package_pversion": "0.30",
+          "package_programs": [],
+          "package_description": null,
+          "package_longDescription": null,
+          "package_homepage": [
+            "https://elpa.gnu.org/packages/python.html"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python313Packages.fire",
+          "package_pname": "fire",
+          "package_pversion": "0.7.1",
+          "package_programs": [],
+          "package_description": "Library for automatically generating command line interfaces",
+          "package_longDescription": "<rendered-html><p>Python Fire is a library for automatically generating command line\ninterfaces (CLIs) from absolutely any Python object.</p>\n<ul>\n<li><p>Python Fire is a simple way to create a CLI in Python.</p></li>\n<li><p>Python Fire is a helpful tool for developing and debugging Python\ncode.</p></li>\n<li><p>Python Fire helps with exploring existing code or turning other\npeople’s code into a CLI.</p></li>\n<li><p>Python Fire makes transitioning between Bash and Python\neasier.</p></li>\n<li><p>Python Fire makes using a Python REPL easier by setting up the\nREPL with the modules and variables you’ll need already imported and\ncreated.</p></li>\n</ul>\n</rendered-html>",
+          "package_homepage": [
+            "https://github.com/google/python-fire"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python314Packages.fire",
+          "package_pname": "fire",
+          "package_pversion": "0.7.1",
+          "package_programs": [],
+          "package_description": "Library for automatically generating command line interfaces",
+          "package_longDescription": "<rendered-html><p>Python Fire is a library for automatically generating command line\ninterfaces (CLIs) from absolutely any Python object.</p>\n<ul>\n<li><p>Python Fire is a simple way to create a CLI in Python.</p></li>\n<li><p>Python Fire is a helpful tool for developing and debugging Python\ncode.</p></li>\n<li><p>Python Fire helps with exploring existing code or turning other\npeople’s code into a CLI.</p></li>\n<li><p>Python Fire makes transitioning between Bash and Python\neasier.</p></li>\n<li><p>Python Fire makes using a Python REPL easier by setting up the\nREPL with the modules and variables you’ll need already imported and\ncreated.</p></li>\n</ul>\n</rendered-html>",
+          "package_homepage": [
+            "https://github.com/google/python-fire"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python313Packages.cvxopt",
+          "package_pname": "cvxopt",
+          "package_pversion": "1.3.3",
+          "package_programs": [],
+          "package_description": "Python Software for Convex Optimization",
+          "package_longDescription": "<rendered-html><p>CVXOPT is a free software package for convex optimization based on\nthe Python programming language. It can be used with the interactive\nPython interpreter, on the command line by executing Python scripts, or\nintegrated in other software via Python extension modules. Its main\npurpose is to make the development of software for convex optimization\napplications straightforward by building on Python’s extensive standard\nlibrary and on the strengths of Python as a high-level programming\nlanguage.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://cvxopt.org/"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python314Packages.cvxopt",
+          "package_pname": "cvxopt",
+          "package_pversion": "1.3.3",
+          "package_programs": [],
+          "package_description": "Python Software for Convex Optimization",
+          "package_longDescription": "<rendered-html><p>CVXOPT is a free software package for convex optimization based on\nthe Python programming language. It can be used with the interactive\nPython interpreter, on the command line by executing Python scripts, or\nintegrated in other software via Python extension modules. Its main\npurpose is to make the development of software for convex optimization\napplications straightforward by building on Python’s extensive standard\nlibrary and on the strengths of Python as a high-level programming\nlanguage.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://cvxopt.org/"
+          ]
+        }
+      },
+      {
+        "_source": {
+          "package_attr_name": "python314Packages.future",
+          "package_pname": "future",
+          "package_pversion": "1.0.0",
+          "package_programs": [],
+          "package_description": "Clean single-source support for Python 3 and 2",
+          "package_longDescription": "<rendered-html><p>python-future is the missing compatibility layer between Python 2 and\nPython 3. It allows you to use a single, clean Python 3.x-compatible\ncodebase to support both Python 2 and Python 3 with minimal\noverhead.</p>\n<p>It provides future and past packages with backports and forward ports\nof features from Python 3 and 2. It also comes with futurize and\npasteurize, customized 2to3-based scripts that helps you to convert\neither Py2 or Py3 code easily to support both Python 2 and 3 in a single\nclean Py3-style codebase, module by module.</p>\n</rendered-html>",
+          "package_homepage": [
+            "https://python-future.org"
+          ]
+        }
+      }
+    ]
+  }
+}

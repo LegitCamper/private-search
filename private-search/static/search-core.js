@@ -61,6 +61,16 @@ export function canLoadNextPage({ batchLoading, polling, hasMoreResults }) {
   return !batchLoading && !polling && hasMoreResults;
 }
 
+// Failed engine requests used to retry every second forever. When all engines
+// were cooling down, one search page could therefore consume the entire local
+// per-minute request budget by itself. Back off exponentially, with longer
+// starting delays for overload/cooldown responses.
+export function retryDelayMs(status, consecutiveFailures) {
+  const base = status === 429 ? 5000 : status === 502 || status === 503 ? 3000 : 1000;
+  const exponent = Math.max(0, Math.min(consecutiveFailures - 1, 4));
+  return Math.min(30000, base * (2 ** exponent));
+}
+
 // True once the end-of-results marker has come within `margin` px of the
 // bottom of the viewport, so the next page starts loading slightly before the
 // user actually reaches the end of the list. `sentinelTop` is the marker's

@@ -1,0 +1,352 @@
+{
+  "totalHits": 11537,
+  "data": [
+    {
+      "id": "Newtonsoft.Json",
+      "version": "13.0.4",
+      "description": "Json.NET is a popular high-performance JSON framework for .NET",
+      "summary": "",
+      "title": "Json.NET",
+      "projectUrl": "https://www.newtonsoft.com/json",
+      "tags": [
+        "json"
+      ],
+      "authors": [
+        "James Newton-King"
+      ],
+      "totalDownloads": 9126730694,
+      "verified": true
+    },
+    {
+      "id": "System.Text.Json",
+      "version": "10.0.11",
+      "description": "Provides high-performance and low-allocating types that serialize objects to JavaScript Object Notation (JSON) text and deserialize JSON text to objects, with UTF-8 support built-in. Also provides types to read and write JSON text encoded as UTF-8, and to create an in-memory document object model (DOM), that is read-only, for random access of the JSON elements within a structured view of the data.\n\nThe System.Text.Json library is built-in as part of the shared framework in .NET Runtime. The package can be installed when you need to use it in other target frameworks.",
+      "summary": "",
+      "title": "System.Text.Json",
+      "projectUrl": "https://dot.net/",
+      "tags": [],
+      "authors": [
+        "Microsoft"
+      ],
+      "totalDownloads": 6312581795,
+      "verified": true
+    },
+    {
+      "id": "Microsoft.IdentityModel.JsonWebTokens",
+      "version": "8.22.0",
+      "description": "Includes types that provide support for creating, serializing and validating JSON Web Tokens. This is a newer, faster version of System.IdentityModel.Tokens.Jwt that has additional functionality.",
+      "summary": "",
+      "title": "Microsoft.IdentityModel.JsonWebTokens",
+      "projectUrl": "https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet",
+      "tags": [
+        ".NET",
+        "Windows",
+        "Authentication",
+        "Identity",
+        "Json",
+        "Web",
+        "Token"
+      ],
+      "authors": [
+        "Microsoft"
+      ],
+      "totalDownloads": 3864173939,
+      "verified": true
+    },
+    {
+      "id": "Microsoft.Extensions.Configuration.Json",
+      "version": "10.0.11",
+      "description": "JSON configuration provider implementation for Microsoft.Extensions.Configuration. This package enables you to read your application's settings from a JSON file. You can use JsonConfigurationExtensions.AddJsonFile extension method on IConfigurationBuilder to add the JSON configuration provider to the configuration builder.",
+      "summary": "",
+      "title": "Microsoft.Extensions.Configuration.Json",
+      "projectUrl": "https://dot.net/",
+      "tags": [],
+      "authors": [
+        "Microsoft"
+      ],
+      "totalDownloads": 3073943065,
+      "verified": true
+    },
+    {
+      "id": "Microsoft.AspNetCore.JsonPatch",
+      "version": "10.0.11",
+      "description": "ASP.NET Core support for JSON PATCH.\n\nThis package was built from the source code at https://github.com/dotnet/dotnet/tree/e2f47b0110ed922f21a1522da67279133ce28f32",
+      "summary": "",
+      "title": "Microsoft.AspNetCore.JsonPatch",
+      "projectUrl": "https://asp.net/",
+      "tags": [
+        "aspnetcore",
+        "json",
+        "jsonpatch"
+      ],
+      "authors": [
+        "Microsoft"
+      ],
+      "totalDownloads": 1531877900,
+      "verified": true
+    },
+    {
+      "id": "Newtonsoft.Json.Bson",
+      "version": "1.0.3",
+      "description": "Json.NET BSON adds support for reading and writing BSON",
+      "summary": "",
+      "title": "Newtonsoft.Json.Bson",
+      "projectUrl": "http://www.newtonsoft.com/json",
+      "tags": [
+        "bson"
+      ],
+      "authors": [
+        "James Newton-King"
+      ],
+      "totalDownloads": 1388495062,
+      "verified": true
+    },
+    {
+      "id": "Microsoft.AspNetCore.Mvc.NewtonsoftJson",
+      "version": "10.0.11",
+      "description": "ASP.NET Core MVC features that use Newtonsoft.Json. Includes input and output formatters for JSON and JSON PATCH.\n\nThis package was built from the source code at https://github.com/dotnet/dotnet/tree/e2f47b0110ed922f21a1522da67279133ce28f32",
+      "summary": "",
+      "title": "Microsoft.AspNetCore.Mvc.NewtonsoftJson",
+      "projectUrl": "https://asp.net/",
+      "tags": [
+        "aspnetcore",
+        "aspnetcoremvc",
+        "json"
+      ],
+      "authors": [
+        "Microsoft"
+      ],
+      "totalDownloads": 827836844,
+      "verified": true
+    },
+    {
+      "id": "Microsoft.AspNetCore.Mvc.Formatters.Json",
+      "version": "2.3.12",
+      "description": "ASP.NET Core MVC formatters for JSON input and output and for JSON PATCH input using Json.NET.",
+      "summary": "",
+      "title": "Microsoft.AspNetCore.Mvc.Formatters.Json",
+      "projectUrl": "https://asp.net/",
+      "tags": [
+        "aspnetcore",
+        "aspnetcoremvc",
+        "json"
+      ],
+      "authors": [
+        "Microsoft"
+      ],
+      "totalDownloads": 703412134,
+      "verified": true
+    },
+    {
+      "id": "System.IdentityModel.Tokens.Jwt",
+      "version": "8.22.0",
+      "description": "Includes types that provide support for creating, serializing and validating JSON Web Tokens. As of IdentityModel 7x, this is a legacy tool that should be replaced with Microsoft.IdentityModel.JsonWebTokens.",
+      "summary": "",
+      "title": "System.IdentityModel.Tokens.Jwt",
+      "projectUrl": "https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet",
+      "tags": [
+        ".NET",
+        "Windows",
+        "Authentication",
+        "Identity",
+        "Json",
+        "Web",
+        "Token"
+      ],
+      "authors": [
+        "Microsoft"
+      ],
+      "totalDownloads": 3946375650,
+      "verified": true
+    },
+    {
+      "id": "System.Runtime.Serialization.Json",
+      "version": "4.3.0",
+      "description": "Provides classes for serializing objects to the JavaScript Object Notation (JSON) and deserializing JSON data to objects.\n\nCommonly Used Types:\nSystem.Runtime.Serialization.Json.DataContractJsonSerializer\n \nWhen using NuGet 3.x this package requires at least version 3.4.",
+      "summary": "",
+      "title": "System.Runtime.Serialization.Json",
+      "projectUrl": "https://dot.net/",
+      "tags": [],
+      "authors": [
+        "Microsoft"
+      ],
+      "totalDownloads": 712656352,
+      "verified": true
+    },
+    {
+      "id": "Serilog.Formatting.Compact",
+      "version": "3.0.0",
+      "description": "A simple, compact JSON-based event format for Serilog.",
+      "summary": "",
+      "title": "Serilog.Formatting.Compact",
+      "projectUrl": "https://github.com/serilog/serilog-formatting-compact",
+      "tags": [
+        "serilog",
+        "json"
+      ],
+      "authors": [
+        "Serilog Contributors"
+      ],
+      "totalDownloads": 963602626,
+      "verified": true
+    },
+    {
+      "id": "JsonSubTypes",
+      "version": "2.1.0",
+      "description": "Discriminated Json Subtypes Converter implementation for .NET",
+      "summary": "",
+      "title": "JsonSubTypes",
+      "projectUrl": "https://github.com/manuc66/JsonSubTypes",
+      "tags": [
+        "json",
+        "converter",
+        "subtype",
+        "inheritance",
+        "deserializeobject",
+        "polymorphism"
+      ],
+      "authors": [
+        "Emmanuel Counasse"
+      ],
+      "totalDownloads": 143678174,
+      "verified": false
+    },
+    {
+      "id": "Serilog.Settings.Configuration",
+      "version": "10.0.1",
+      "description": "Microsoft.Extensions.Configuration (appsettings.json) support for Serilog.",
+      "summary": "",
+      "title": "Serilog.Settings.Configuration",
+      "projectUrl": "https://github.com/serilog/serilog-settings-configuration",
+      "tags": [
+        "serilog",
+        "json",
+        "appsettings"
+      ],
+      "authors": [
+        "Serilog Contributors"
+      ],
+      "totalDownloads": 979148960,
+      "verified": true
+    },
+    {
+      "id": "System.Net.Http.Json",
+      "version": "10.0.11",
+      "description": "Provides extension methods for System.Net.Http.HttpClient and System.Net.Http.HttpContent that perform automatic serialization and deserialization using System.Text.Json.\n\nCommonly Used Types:\nSystem.Net.Http.Json.HttpClientJsonExtensions\nSystem.Net.Http.Json.HttpContentJsonExtensions\nSystem.Net.Http.Json.JsonContent",
+      "summary": "",
+      "title": "System.Net.Http.Json",
+      "projectUrl": "https://dot.net/",
+      "tags": [],
+      "authors": [
+        "Microsoft"
+      ],
+      "totalDownloads": 250379976,
+      "verified": true
+    },
+    {
+      "id": "Json.More.Net",
+      "version": "3.0.1",
+      "description": "Provides extended functionality for the System.Text.Json namespace.",
+      "summary": "",
+      "title": "Json.More.Net",
+      "projectUrl": "https://github.com/json-everything/json-everything",
+      "tags": [
+        "json",
+        "system.text.json",
+        "json.more"
+      ],
+      "authors": [
+        "Greg Dennis"
+      ],
+      "totalDownloads": 96948026,
+      "verified": false
+    },
+    {
+      "id": "Newtonsoft.Json.Schema",
+      "version": "4.0.1",
+      "description": "Json.NET Schema is a complete and easy-to-use JSON Schema framework for .NET",
+      "summary": "",
+      "title": "Json.NET Schema",
+      "projectUrl": "https://www.newtonsoft.com/jsonschema",
+      "tags": [
+        "json",
+        "schema",
+        "jsonschema"
+      ],
+      "authors": [
+        "Newtonsoft"
+      ],
+      "totalDownloads": 95964456,
+      "verified": true
+    },
+    {
+      "id": "JsonPointer.Net",
+      "version": "7.0.3",
+      "description": "JSON Pointer built on the System.Text.Json namespace",
+      "summary": "",
+      "title": "JsonPointer.Net",
+      "projectUrl": "https://github.com/json-everything/json-everything",
+      "tags": [
+        "json-pointer",
+        "json",
+        "pointer"
+      ],
+      "authors": [
+        "Greg Dennis"
+      ],
+      "totalDownloads": 85166787,
+      "verified": false
+    },
+    {
+      "id": "NJsonSchema.NewtonsoftJson",
+      "version": "11.6.1",
+      "description": "JSON Schema reader, generator and validator for .NET",
+      "summary": "",
+      "title": "NJsonSchema.NewtonsoftJson",
+      "projectUrl": "http://njsonschema.org/",
+      "tags": [
+        "json",
+        "schema",
+        "validation",
+        "generator",
+        ".net"
+      ],
+      "authors": [
+        "Rico Suter"
+      ],
+      "totalDownloads": 91459315,
+      "verified": false
+    },
+    {
+      "id": "GraphQL.NewtonsoftJson",
+      "version": "8.8.5",
+      "description": "JSON.NET serializer for GraphQL.NET",
+      "summary": "",
+      "title": "GraphQL.NewtonsoftJson",
+      "projectUrl": null,
+      "tags": [
+        "GraphQL",
+        "json"
+      ],
+      "authors": [
+        "GraphQL.NewtonsoftJson"
+      ],
+      "totalDownloads": 52588461,
+      "verified": false
+    },
+    {
+      "id": "Microsoft.Kiota.Serialization.Json",
+      "version": "2.1.1",
+      "description": "Kiota JSON serialization provider implementation with System.Text.Json.",
+      "summary": "",
+      "title": "Microsoft.Kiota.Serialization.Json",
+      "projectUrl": "https://aka.ms/kiota/docs",
+      "tags": [],
+      "authors": [
+        "Microsoft"
+      ],
+      "totalDownloads": 126324685,
+      "verified": true
+    }
+  ]
+}

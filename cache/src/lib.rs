@@ -249,8 +249,10 @@ impl<R: CacheableRow> MergedCache<R> {
                             if let Some(&row_id) = existing_urls.get(&url) {
                                 attribute_existing.push((row_id, name.to_string()));
                             } else if let Some(&idx) = batch_index.get(&url) {
-                                fresh_batch[idx].1.push(name.to_string());
-                                new_count += 1;
+                                if !fresh_batch[idx].1.iter().any(|engine| engine == name) {
+                                    fresh_batch[idx].1.push(name.to_string());
+                                    new_count += 1;
+                                }
                             } else {
                                 batch_index.insert(url, fresh_batch.len());
                                 fresh_batch.push((row, vec![name.to_string()]));
@@ -653,6 +655,20 @@ mod test {
             result.has_more,
             "Long hasn't proven exhaustion within the rounds needed to fill the window"
         );
+    }
+
+    #[tokio::test]
+    async fn duplicate_rows_from_one_source_do_not_duplicate_engine_attribution() {
+        let cache = test_cache().await;
+        let source = ScriptedSource::new("A", vec![vec![row("shared"), row("shared")]]);
+
+        let result = cache
+            .get_or_extend("q", &one_source(source), 0, 1, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].engines, vec!["A".to_string()]);
     }
 
     #[tokio::test]

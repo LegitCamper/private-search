@@ -1,0 +1,869 @@
+{
+ "exhaustive": {
+  "nbHits": false,
+  "typo": false
+ },
+ "exhaustiveNbHits": false,
+ "exhaustiveTypo": false,
+ "hits": [
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "donmcc"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "Actix \u2013 an actor framework for the <em>Rust</em> <em>programming</em> language"
+    },
+    "url": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "https://simplabs.com/blog/2018/06/11/actix.html"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_donmcc",
+    "story_17285692"
+   ],
+   "author": "donmcc",
+   "children": [
+    17288899
+   ],
+   "created_at": "2018-06-11T16:27:54Z",
+   "created_at_i": 1528734474,
+   "num_comments": 1,
+   "objectID": "17285692",
+   "points": 13,
+   "story_id": 17285692,
+   "title": "Actix \u2013 an actor framework for the Rust programming language",
+   "updated_at": "2024-09-20T02:40:04Z",
+   "url": "https://simplabs.com/blog/2018/06/11/actix.html"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "SudoSH"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "Understanding Memory Safety in the <em>Rust</em> <em>Programming</em> Language"
+    },
+    "url": {
+     "fullyHighlighted": false,
+     "matchLevel": "partial",
+     "matchedWords": [
+      "rust"
+     ],
+     "value": "https://coderoasis.com/<em>rust</em>-lang-memory-safety/"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_SudoSH",
+    "story_39975521"
+   ],
+   "author": "SudoSH",
+   "children": [
+    39976444,
+    39981716
+   ],
+   "created_at": "2024-04-09T01:36:53Z",
+   "created_at_i": 1712626613,
+   "num_comments": 0,
+   "objectID": "39975521",
+   "points": 13,
+   "story_id": 39975521,
+   "title": "Understanding Memory Safety in the Rust Programming Language",
+   "updated_at": "2025-01-29T08:33:47Z",
+   "url": "https://coderoasis.com/rust-lang-memory-safety/"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "amatheus"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "<em>Rust</em>: A <em>programming</em> language that grows with you, your career and your projects"
+    },
+    "url": {
+     "fullyHighlighted": false,
+     "matchLevel": "partial",
+     "matchedWords": [
+      "rust"
+     ],
+     "value": "https://kerkour.com/<em>rust</em>-grows-with-you"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_amatheus",
+    "story_44395289"
+   ],
+   "author": "amatheus",
+   "children": [
+    44395337
+   ],
+   "created_at": "2025-06-27T09:33:52Z",
+   "created_at_i": 1751016832,
+   "num_comments": 1,
+   "objectID": "44395289",
+   "points": 12,
+   "story_id": 44395289,
+   "title": "Rust: A programming language that grows with you, your career and your projects",
+   "updated_at": "2025-06-29T03:21:23Z",
+   "url": "https://kerkour.com/rust-grows-with-you"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "adamnemecek"
+    },
+    "story_text": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": ""
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "Rusti: REPL for the <em>Rust</em> <em>programming</em> language"
+    },
+    "url": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "https://github.com/murarth/rusti"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_adamnemecek",
+    "story_8758763"
+   ],
+   "author": "adamnemecek",
+   "created_at": "2014-12-16T19:18:54Z",
+   "created_at_i": 1418757534,
+   "num_comments": 0,
+   "objectID": "8758763",
+   "points": 10,
+   "story_id": 8758763,
+   "story_text": "",
+   "title": "Rusti: REPL for the Rust programming language",
+   "updated_at": "2024-09-19T21:27:00Z",
+   "url": "https://github.com/murarth/rusti"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "MilnerRoute"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "'Has the <em>Rust</em> <em>programming</em> language's popularity reached its plateau?'"
+    },
+    "url": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "https://developers.slashdot.org/story/26/04/12/2329229/has-the-<em>rust</em>-<em>programming</em>-languages-popularity-reached-its-plateau"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_MilnerRoute",
+    "story_47756497"
+   ],
+   "author": "MilnerRoute",
+   "created_at": "2026-04-13T19:04:09Z",
+   "created_at_i": 1776107049,
+   "num_comments": 0,
+   "objectID": "47756497",
+   "points": 8,
+   "story_id": 47756497,
+   "title": "'Has the Rust programming language's popularity reached its plateau?'",
+   "updated_at": "2026-04-14T17:58:23Z",
+   "url": "https://developers.slashdot.org/story/26/04/12/2329229/has-the-rust-programming-languages-popularity-reached-its-plateau"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "sc90"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "SpaceX about the <em>Rust</em> <em>Programming</em> Language"
+    },
+    "url": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "https://www.reddit.com/r/<em>rust</em>/comments/ndm4ne/spacex_about_the_<em>rust</em>_<em>programming</em>_language/"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_sc90",
+    "story_27225434"
+   ],
+   "author": "sc90",
+   "children": [
+    27225590
+   ],
+   "created_at": "2021-05-20T18:50:00Z",
+   "created_at_i": 1621536600,
+   "num_comments": 1,
+   "objectID": "27225434",
+   "points": 7,
+   "story_id": 27225434,
+   "title": "SpaceX about the Rust Programming Language",
+   "updated_at": "2024-09-20T08:35:17Z",
+   "url": "https://www.reddit.com/r/rust/comments/ndm4ne/spacex_about_the_rust_programming_language/"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "da4c30ff"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "Nalgebra \u2013 Linear algebra library for the <em>Rust</em> <em>programming</em> language"
+    },
+    "url": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "http://nalgebra.org/"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_da4c30ff",
+    "story_13658362"
+   ],
+   "author": "da4c30ff",
+   "children": [
+    13659797
+   ],
+   "created_at": "2017-02-16T07:59:44Z",
+   "created_at_i": 1487231984,
+   "num_comments": 1,
+   "objectID": "13658362",
+   "points": 7,
+   "story_id": 13658362,
+   "title": "Nalgebra \u2013 Linear algebra library for the Rust programming language",
+   "updated_at": "2024-09-20T00:25:58Z",
+   "url": "http://nalgebra.org/"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "ionychal"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "AWS: We are investing in the <em>Rust</em> <em>programming</em> language"
+    },
+    "url": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "https://www.zdnet.com/article/<em>programming</em>-languages-aws-explains-why-<em>rust</em>-is-so-important/"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_ionychal",
+    "story_30434938"
+   ],
+   "author": "ionychal",
+   "created_at": "2022-02-22T22:44:50Z",
+   "created_at_i": 1645569890,
+   "num_comments": 0,
+   "objectID": "30434938",
+   "points": 7,
+   "story_id": 30434938,
+   "title": "AWS: We are investing in the Rust programming language",
+   "updated_at": "2024-09-20T10:34:31Z",
+   "url": "https://www.zdnet.com/article/programming-languages-aws-explains-why-rust-is-so-important/"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "ycombonator"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "Why is the <em>Rust</em> <em>programming</em> language not getting popular?"
+    },
+    "url": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "https://www.quora.com/Why-is-the-<em>Rust</em>-<em>programming</em>-language-not-getting-popular/answer/Mario-Galindo-Queralt?share=1"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_ycombonator",
+    "story_21849417"
+   ],
+   "author": "ycombonator",
+   "created_at": "2019-12-21T03:34:00Z",
+   "created_at_i": 1576899240,
+   "num_comments": 0,
+   "objectID": "21849417",
+   "points": 7,
+   "story_id": 21849417,
+   "title": "Why is the Rust programming language not getting popular?",
+   "updated_at": "2024-09-20T05:20:58Z",
+   "url": "https://www.quora.com/Why-is-the-Rust-programming-language-not-getting-popular/answer/Mario-Galindo-Queralt?share=1"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "shantnutiwari"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "The <em>Rust</em> <em>programming</em> language positively sucks"
+    },
+    "url": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "https://old.reddit.com/r/<em>rust</em>/comments/12b7p2p/the_<em>rust</em>_<em>programming</em>_language_absolutely/"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_shantnutiwari",
+    "story_37944043"
+   ],
+   "author": "shantnutiwari",
+   "children": [
+    37944208,
+    37944331
+   ],
+   "created_at": "2023-10-19T15:16:42Z",
+   "created_at_i": 1697728602,
+   "num_comments": 5,
+   "objectID": "37944043",
+   "points": 6,
+   "story_id": 37944043,
+   "title": "The Rust programming language positively sucks",
+   "updated_at": "2024-09-20T15:25:04Z",
+   "url": "https://old.reddit.com/r/rust/comments/12b7p2p/the_rust_programming_language_absolutely/"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "zepearl"
+    },
+    "story_text": {
+     "fullyHighlighted": false,
+     "matchLevel": "partial",
+     "matchedWords": [
+      "rust"
+     ],
+     "value": "I indirectly started asking myself this question yesterday &amp; today while struggling to query Google with e.g. &quot;<em>rust</em> ammonia keep cleaned elements&quot; (&quot;Ammonia&quot; is an HTML lib which I just started to use to transform relative links to absolute in an HTML doc, and to then extract them), getting back results like &quot;Cleaning metals: basic guidelines&quot;, &quot;10 household items to help clean <em>rust</em> at home&quot;, etc... =&gt; I'm in a Google-search-bubble, argh :P<p>This thread<p>https://stackoverflow.com/questions/16494822/why-is-it-called-<em>rust</em>#:~:text=TL%3BDR%3A%20Rust%20is%20named,incorporating%20new%20technology%20into%20it.<p>...mentions...<p>&gt; <i>TL;DR: <em>Rust</em> is named after a fungus that is robust, distributed, and parallel.</i><p>&gt; <i>It is also a substring of &quot;robust&quot;.</i><p>...referring to this:<p>https://www.reddit.com/r/<em>rust</em>/comments/27jvdt/internet_archaeology_the_definitive_endall_source/<p>Is it really like that? Named after this fungus https://en.wikipedia.org/wiki/<em>Rust</em>_%28fungus%29 ?<p>Asking just because I'm curious (and annoyed about the SEO, but that's as well the fault of the &quot;ammonia&quot; lib - if I'll ever create a <em>Rust</em> lib I'll then call it &quot;get_rid_of&quot;, hehe)."
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "Ask HN: Why was the \u201c<em>Rust</em>\u201d <em>programming</em> language named like that?"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_zepearl",
+    "story_32585149",
+    "ask_hn"
+   ],
+   "author": "zepearl",
+   "children": [
+    32585794,
+    32593002
+   ],
+   "created_at": "2022-08-24T20:14:40Z",
+   "created_at_i": 1661372080,
+   "num_comments": 4,
+   "objectID": "32585149",
+   "points": 6,
+   "story_id": 32585149,
+   "story_text": "I indirectly started asking myself this question yesterday &amp; today while struggling to query Google with e.g. &quot;rust ammonia keep cleaned elements&quot; (&quot;Ammonia&quot; is an HTML lib which I just started to use to transform relative links to absolute in an HTML doc, and to then extract them), getting back results like &quot;Cleaning metals: basic guidelines&quot;, &quot;10 household items to help clean rust at home&quot;, etc... =&gt; I&#x27;m in a Google-search-bubble, argh :P<p>This thread<p>https:&#x2F;&#x2F;stackoverflow.com&#x2F;questions&#x2F;16494822&#x2F;why-is-it-called-rust#:~:text=TL%3BDR%3A%20Rust%20is%20named,incorporating%20new%20technology%20into%20it.<p>...mentions...<p>&gt; <i>TL;DR: Rust is named after a fungus that is robust, distributed, and parallel.</i><p>&gt; <i>It is also a substring of &quot;robust&quot;.</i><p>...referring to this:<p>https:&#x2F;&#x2F;www.reddit.com&#x2F;r&#x2F;rust&#x2F;comments&#x2F;27jvdt&#x2F;internet_archaeology_the_definitive_endall_source&#x2F;<p>Is it really like that? Named after this fungus https:&#x2F;&#x2F;en.wikipedia.org&#x2F;wiki&#x2F;Rust_%28fungus%29 ?<p>Asking just because I&#x27;m curious (and annoyed about the SEO, but that&#x27;s as well the fault of the &quot;ammonia&quot; lib - if I&#x27;ll ever create a Rust lib I&#x27;ll then call it &quot;get_rid_of&quot;, hehe).",
+   "title": "Ask HN: Why was the \u201cRust\u201d programming language named like that?",
+   "updated_at": "2024-09-20T11:55:13Z"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "opengears"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "The <em>Rust</em> <em>Programming</em> Language, 2nd Edition (Covering <em>Rust</em> 2021)"
+    },
+    "url": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "https://nostarch.com/<em>rust</em>-<em>programming</em>-language-2nd-edition"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_opengears",
+    "story_33199399"
+   ],
+   "author": "opengears",
+   "children": [
+    33199400,
+    33199406,
+    33200142
+   ],
+   "created_at": "2022-10-14T03:42:45Z",
+   "created_at_i": 1665718965,
+   "num_comments": 3,
+   "objectID": "33199399",
+   "points": 6,
+   "story_id": 33199399,
+   "title": "The Rust Programming Language, 2nd Edition (Covering Rust 2021)",
+   "updated_at": "2024-09-20T12:19:12Z",
+   "url": "https://nostarch.com/rust-programming-language-2nd-edition"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "ingve"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "CIS 198: <em>Rust</em> <em>Programming</em>"
+    },
+    "url": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "https://cis198-2016s.github.io/schedule/"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_ingve",
+    "story_14935517"
+   ],
+   "author": "ingve",
+   "created_at": "2017-08-05T13:15:58Z",
+   "created_at_i": 1501938958,
+   "num_comments": 0,
+   "objectID": "14935517",
+   "points": 6,
+   "story_id": 14935517,
+   "title": "CIS 198: Rust Programming",
+   "updated_at": "2024-09-20T01:08:49Z",
+   "url": "https://cis198-2016s.github.io/schedule/"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "joeyespo"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "RustBelt: Securing the Foundations of the <em>Rust</em> <em>Programming</em> Language"
+    },
+    "url": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "https://www.ralfj.de/blog/2017/07/08/rustbelt.html"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_joeyespo",
+    "story_14737239"
+   ],
+   "author": "joeyespo",
+   "created_at": "2017-07-10T16:14:28Z",
+   "created_at_i": 1499703268,
+   "num_comments": 0,
+   "objectID": "14737239",
+   "points": 6,
+   "story_id": 14737239,
+   "title": "RustBelt: Securing the Foundations of the Rust Programming Language",
+   "updated_at": "2024-09-20T01:02:42Z",
+   "url": "https://www.ralfj.de/blog/2017/07/08/rustbelt.html"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "littlestymaar"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "RustBelt: Securing the Foundations of the <em>Rust</em> <em>Programming</em> Language"
+    },
+    "url": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "https://www.ralfj.de/blog/2017/07/08/rustbelt.html"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_littlestymaar",
+    "story_14731334"
+   ],
+   "author": "littlestymaar",
+   "children": [
+    14731361
+   ],
+   "created_at": "2017-07-09T19:50:13Z",
+   "created_at_i": 1499629813,
+   "num_comments": 0,
+   "objectID": "14731334",
+   "points": 6,
+   "story_id": 14731334,
+   "title": "RustBelt: Securing the Foundations of the Rust Programming Language",
+   "updated_at": "2024-09-20T01:02:04Z",
+   "url": "https://www.ralfj.de/blog/2017/07/08/rustbelt.html"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "gfx"
+    },
+    "story_text": {
+     "fullyHighlighted": false,
+     "matchLevel": "partial",
+     "matchedWords": [
+      "rust"
+     ],
+     "value": "I started this in January and haven't written a line of the compiler myself. Coding agents write every line; I do design and taste. Wado is a <em>Rust</em>-flavored, GC'd language for WebAssembly Component Model.<p>Try it in the browser, and ask me anything!"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "Show HN: Building a <em>Rust</em>-ish <em>programming</em> language with 100% coding agents: Wado"
+    },
+    "url": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "https://wado-lang.org/playground/"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_gfx",
+    "story_48952507",
+    "show_hn"
+   ],
+   "author": "gfx",
+   "children": [
+    48954346
+   ],
+   "created_at": "2026-07-17T21:32:57Z",
+   "created_at_i": 1784323977,
+   "num_comments": 2,
+   "objectID": "48952507",
+   "points": 5,
+   "story_id": 48952507,
+   "story_text": "I started this in January and haven&#x27;t written a line of the compiler myself. Coding agents write every line; I do design and taste. Wado is a Rust-flavored, GC&#x27;d language for WebAssembly Component Model.<p>Try it in the browser, and ask me anything!",
+   "title": "Show HN: Building a Rust-ish programming language with 100% coding agents: Wado",
+   "updated_at": "2026-07-18T04:39:29Z",
+   "url": "https://wado-lang.org/playground/"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "charlieegan3"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "CIS 198: <em>Rust</em> <em>Programming</em> (UPenn)"
+    },
+    "url": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "https://cis198-2016s.github.io/"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_charlieegan3",
+    "story_11069664"
+   ],
+   "author": "charlieegan3",
+   "children": [
+    11069926
+   ],
+   "created_at": "2016-02-09T23:27:42Z",
+   "created_at_i": 1455060462,
+   "num_comments": 1,
+   "objectID": "11069664",
+   "points": 5,
+   "story_id": 11069664,
+   "title": "CIS 198: Rust Programming (UPenn)",
+   "updated_at": "2024-09-19T22:51:05Z",
+   "url": "https://cis198-2016s.github.io/"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "plondon514"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "<em>Rust</em> <em>programming</em> for web developers (by a web developer)"
+    },
+    "url": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "https://codeamigo.dev/lessons/161"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_plondon514",
+    "story_29279110"
+   ],
+   "author": "plondon514",
+   "created_at": "2021-11-19T16:42:17Z",
+   "created_at_i": 1637340137,
+   "num_comments": 0,
+   "objectID": "29279110",
+   "points": 5,
+   "story_id": 29279110,
+   "title": "Rust programming for web developers (by a web developer)",
+   "updated_at": "2024-09-20T09:54:41Z",
+   "url": "https://codeamigo.dev/lessons/161"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "rbanffy"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "Why you should learn the <em>Rust</em> <em>programming</em> language"
+    },
+    "url": {
+     "fullyHighlighted": false,
+     "matchLevel": "partial",
+     "matchedWords": [
+      "rust"
+     ],
+     "value": "https://www.ibm.com/developerworks/library/os-developers-know-<em>rust</em>/index.html?social_post=1470229852&fst=Learn"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_rbanffy",
+    "story_16847580"
+   ],
+   "author": "rbanffy",
+   "created_at": "2018-04-16T08:50:03Z",
+   "created_at_i": 1523868603,
+   "num_comments": 0,
+   "objectID": "16847580",
+   "points": 5,
+   "story_id": 16847580,
+   "title": "Why you should learn the Rust programming language",
+   "updated_at": "2024-09-20T02:20:32Z",
+   "url": "https://www.ibm.com/developerworks/library/os-developers-know-rust/index.html?social_post=1470229852&fst=Learn"
+  },
+  {
+   "_highlightResult": {
+    "author": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "ingve"
+    },
+    "title": {
+     "fullyHighlighted": false,
+     "matchLevel": "full",
+     "matchedWords": [
+      "rust",
+      "programming"
+     ],
+     "value": "RustBelt: Securing the Foundations of the <em>Rust</em> <em>Programming</em> Language"
+    },
+    "url": {
+     "matchLevel": "none",
+     "matchedWords": [],
+     "value": "https://www.ralfj.de/blog/2017/07/08/rustbelt.html"
+    }
+   },
+   "_tags": [
+    "story",
+    "author_ingve",
+    "story_14729061"
+   ],
+   "author": "ingve",
+   "created_at": "2017-07-09T09:58:40Z",
+   "created_at_i": 1499594320,
+   "num_comments": 0,
+   "objectID": "14729061",
+   "points": 5,
+   "story_id": 14729061,
+   "title": "RustBelt: Securing the Foundations of the Rust Programming Language",
+   "updated_at": "2024-09-20T01:01:52Z",
+   "url": "https://www.ralfj.de/blog/2017/07/08/rustbelt.html"
+  }
+ ],
+ "hitsPerPage": 20,
+ "nbHits": 1426,
+ "nbPages": 50,
+ "page": 2,
+ "params": "query=rust+programming&tags=story&page=2&hitsPerPage=20&advancedSyntax=true&analyticsTags=backend",
+ "processingTimeMS": 19,
+ "query": "rust programming",
+ "serverTimeMS": 20
+}

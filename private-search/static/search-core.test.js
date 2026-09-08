@@ -9,6 +9,7 @@ import {
   canLoadNextPage,
   isWithinPreloadRange,
   shouldAutoContinue,
+  retryDelayMs,
   SkeletonQueue,
 } from "./search-core.js";
 
@@ -90,6 +91,19 @@ test("getQueryParam reads a param from a location.search-shaped string", () => {
 test("getQueryParam defaults to an empty string when absent", () => {
   assert.equal(getQueryParam("?t=general", "q"), "");
   assert.equal(getQueryParam("", "q"), "");
+});
+
+test("retryDelayMs exponentially backs off ordinary failures", () => {
+  assert.equal(retryDelayMs(0, 1), 1000);
+  assert.equal(retryDelayMs(500, 2), 2000);
+  assert.equal(retryDelayMs(500, 6), 16000);
+});
+
+test("retryDelayMs gives cooldown and rate-limit responses more time", () => {
+  assert.equal(retryDelayMs(503, 1), 3000);
+  assert.equal(retryDelayMs(503, 5), 30000);
+  assert.equal(retryDelayMs(429, 1), 5000);
+  assert.equal(retryDelayMs(429, 5), 30000);
 });
 
 test("skeletonsNeeded caps outstanding placeholders at one page", () => {
