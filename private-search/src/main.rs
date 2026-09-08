@@ -61,7 +61,7 @@ fn build_rocket() -> Rocket<Build> {
     );
 
     let cache_clean_interval = resolve_secs("CACHE_CLEAN_INTERVAL_SECS", 60 * 60); // hourly
-    let cache_max_age = resolve_secs("CACHE_MAX_AGE_SECS", 7 * 24 * 60 * 60); // 7 days
+    let cache_max_age = resolve_secs("CACHE_MAX_AGE_SECS", 24 * 60 * 60); // 1 day
 
     let figment = rocket::Config::figment().merge(("template_dir", template_dir));
 
