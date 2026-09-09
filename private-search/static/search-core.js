@@ -144,3 +144,347 @@ export class SkeletonQueue {
     return leftover;
   }
 }
+
+// Incremental SSE parser accepting arbitrary decoded text chunks.
+// Handles CRLF/LF line endings, multiline `data:` fields, `event:`, `id:`,
+// comments, boundaries split across chunks. Returns complete frames as
+// they become available (no browser globals, pure Node-testable).
+//
+// Usage:
+//   const parser = new SSEParser();
+//   const frames = [];
+//   parser.on('frame', (frame) => frames.push(frame));
+//   parser.feed('event: results\ndata: {');
+//   parser.feed('...}\n\n');  // frame emitted here
+export class SSEParser {
+  constructor() {
+    this._buffer = "";
+    this._currentFrame = {};
+    this._listeners = new Map();
+  }
+
+  on(event, callback) {
+    if (!this._listeners.has(event)) {
+      this._listeners.set(event, []);
+    }
+    this._listeners.get(event).push(callback);
+  }
+
+  _emit(event, data) {
+    if (this._listeners.has(event)) {
+      for (const callback of this._listeners.get(event)) {
+        callback(data);
+      }
+    }
+  }
+
+  feed(text) {
+    this._buffer += text;
+    this._processBuffer();
+  }
+
+  end() {
+    // Flush any remaining partial frame by adding a final newline
+    if (this._buffer.length > 0) {
+      this._buffer += "\n";
+      this._processBuffer();
+    }
+    if (Object.keys(this._currentFrame).length > 0) {
+      this._emitFrame();
+    }
+  }
+
+  _processBuffer() {
+    // Process complete lines (ending with \n or \r\n)
+    let lineEnd;
+    while ((lineEnd = this._buffer.search(/\r?\n/)) !== -1) {
+      const line = this._buffer.slice(0, lineEnd);
+      this._buffer = this._buffer.slice(lineEnd + (this._buffer[lineEnd] === "\r" ? 2 : 1));
+
+      if (line.length === 0) {
+        // Empty line = frame boundary
+        if (Object.keys(this._currentFrame).length > 0) {
+          this._emitFrame();
+        }
+      } else if (line.startsWith(":")) {
+        // Comment line — ignore
+        continue;
+      } else if (line.includes(":")) {
+        const colonIndex = line.indexOf(":");
+        const field = line.slice(0, colonIndex);
+        let value = line.slice(colonIndex + 1);
+        // Remove leading space if present
+        if (value.startsWith(" ")) {
+          value = value.slice(1);
+        }
+
+        if (field === "data") {
+          // Accumulate data lines
+          if (!this._currentFrame.data) {
+            this._currentFrame.data = value;
+          } else {
+            this._currentFrame.data += "\n" + value;
+          }
+        } else if (field === "event") {
+          this._currentFrame.event = value;
+        } else if (field === "id") {
+          this._currentFrame.id = value;
+        }
+        // Ignore other fields (e.g. retry)
+      }
+    }
+  }
+
+  _emitFrame() {
+    const frame = { ...this._currentFrame };
+    if (frame.data) {
+      try {
+        frame.data = JSON.parse(frame.data);
+      } catch (e) {
+        // Leave as raw string if not valid JSON
+      }
+    }
+    this._emit("frame", frame);
+    this._currentFrame = {};
+  }
+}
+
+// Stream-state reducer managing named event payloads from the server.
+// Detects replays via monotonic numeric IDs, deduplicates URL entries and
+// engine/attribution updates idempotently, and tracks order tokens + cursors.
+export class StreamStateReducer {
+  constructor() {
+    this.orderId = null;
+    this.canonical = false; // boolean flag from meta
+    this.canonicalOrderId = null; // ID only from done
+    this.activeOrderToken = null;
+    this.serverCursor = 0;
+    this.renderedCount = 0; // distinct URLs appended
+    this.nextCursor = 0;
+    this.hasMore = false;
+    this.lastEventId = null;
+    this.lastNumericEventId = -1; // replay detection
+    this.seenUrls = new Set();
+    this.attributionByUrl = new Map(); // url -> Set of engine names
+    this.engineReports = new Map(); // engine name -> last report
+    this.isComplete = false;
+    this.error = null;
+    this.actions = [];
+  }
+
+  // Process frame, detecting replays via numeric IDs.
+  processFrame(frame) {
+    this.actions = [];
+
+    // Detect replays: numeric ID <= lastNumericEventId = exact replay.
+    // Check before updating lastEventId so an older replay cannot move the
+    // reconnect cursor backwards.
+    if (frame.id && /^\d+$/.test(frame.id)) {
+      const numId = parseInt(frame.id, 10);
+      if (numId <= this.lastNumericEventId) {
+        return; // No actions, no mutations
+      }
+      this.lastNumericEventId = numId;
+    }
+    this.lastEventId = frame.id || this.lastEventId;
+
+    if (!frame.event || frame.data === undefined) {
+      return;
+    }
+
+    const data = frame.data;
+    if (frame.event !== "error" && typeof data !== "object") {
+      return;
+    }
+
+    switch (frame.event) {
+      case "meta":
+        this._handleMeta(data);
+        break;
+      case "results":
+        this._handleResults(data);
+        break;
+      case "attribution":
+        this._handleAttribution(data);
+        break;
+      case "engine":
+        this._handleEngine(data);
+        break;
+      case "done":
+        this._handleDone(data);
+        break;
+      case "error":
+        this._handleError(data);
+        break;
+    }
+  }
+
+  _handleMeta(data) {
+    // { orderId, canonical (bool), start, count (page size) }
+    if (data.orderId !== undefined) {
+      this.orderId = data.orderId;
+      this.activeOrderToken = data.orderId;
+    }
+    if (data.canonical !== undefined) {
+      this.canonical = !!data.canonical;
+    }
+    if (data.start !== undefined) {
+      this.serverCursor = data.start;
+    }
+    // count is page size, not rendered count
+  }
+
+  _handleResults(data) {
+    // Support single { position, result, cached } or batches { entries: [...] } / { results: [...] }
+    const entries = data.entries || data.results || (data.position !== undefined ? [data] : []);
+
+    for (const entry of entries) {
+      if (entry.position === undefined || !entry.result) {
+        continue;
+      }
+
+      const url = entry.result.url || entry.result.href;
+      if (!url) {
+        continue; // Reject entries with no URL
+      }
+
+      const isNew = !this.seenUrls.has(url);
+      this.seenUrls.add(url);
+
+      // Always advance serverCursor based on position, even for duplicates
+      if (entry.position !== undefined) {
+        this.serverCursor = Math.max(this.serverCursor, entry.position + 1);
+      }
+
+      if (isNew) {
+        this.actions.push({
+          type: "append",
+          position: entry.position,
+          result: entry.result,
+          cached: !!(entry.result.cached || entry.cached),
+        });
+        this.renderedCount++;
+      }
+    }
+  }
+
+  _handleAttribution(data) {
+    // Support two formats:
+    // 1. Full set: { url, engines: [...] } — definitive set from server
+    // 2. Singular: { url, engine, ... } — add to existing set (backward compat)
+    if (!data.url) {
+      return;
+    }
+
+    if (!this.attributionByUrl.has(data.url)) {
+      this.attributionByUrl.set(data.url, new Set());
+    }
+
+    const currentEngines = this.attributionByUrl.get(data.url);
+    let newEnginesSet;
+
+    if (Array.isArray(data.engines)) {
+      // Full array format: use as definitive set
+      newEnginesSet = new Set(data.engines.filter(engine => typeof engine === "string"));
+    } else if (typeof data.engine === "string" && data.engine) {
+      // Singular format: add to existing set
+      newEnginesSet = new Set(currentEngines);
+      newEnginesSet.add(data.engine);
+    } else {
+      return;
+    }
+
+    // Check if the normalized set has changed
+    const hasChanged = newEnginesSet.size !== currentEngines.size ||
+      Array.from(newEnginesSet).some(e => !currentEngines.has(e));
+
+    if (hasChanged) {
+      // Update with full new set
+      this.attributionByUrl.set(data.url, newEnginesSet);
+      this.actions.push({
+        type: "updateAttribution",
+        url: data.url,
+        engines: Array.from(newEnginesSet),
+      });
+    }
+  }
+
+  _handleEngine(data) {
+    // { name (or engine), status, ...report } — no redundant updates
+    const name = data.name || data.engine;
+    if (!name) {
+      return;
+    }
+
+    const lastReport = this.engineReports.get(name);
+    const reportStr = JSON.stringify(data);
+    const lastReportStr = lastReport ? JSON.stringify(lastReport) : null;
+
+    if (reportStr !== lastReportStr) {
+      this.engineReports.set(name, { ...data });
+      this.actions.push({
+        type: "updateEngine",
+        name: name,
+        report: { ...data },
+      });
+    }
+  }
+
+  _handleDone(data) {
+    // { activeOrderId, canonicalOrderId, nextCursor, hasMore }
+    if (data.activeOrderId !== undefined) {
+      this.activeOrderToken = data.activeOrderId;
+    }
+    if (data.canonicalOrderId !== undefined) {
+      this.canonicalOrderId = data.canonicalOrderId;
+    }
+    if (data.nextCursor !== undefined) {
+      this.nextCursor = data.nextCursor;
+      this.serverCursor = data.nextCursor;
+    }
+    if (data.hasMore !== undefined) {
+      this.hasMore = !!data.hasMore;
+    }
+
+    this.isComplete = true;
+    this.actions.push({
+      type: "done",
+      activeOrderId: data.activeOrderId,
+      canonicalOrderId: data.canonicalOrderId,
+      nextCursor: data.nextCursor,
+      hasMore: this.hasMore,
+    });
+  }
+
+  _handleError(data) {
+    if (typeof data === "string") {
+      this.error = data;
+    } else if (typeof data === "object" && data !== null) {
+      this.error = data.message || "Unknown error";
+    } else {
+      this.error = "Unknown error";
+    }
+    this.isComplete = true;
+    this.actions.push({
+      type: "error",
+      message: this.error,
+    });
+  }
+
+  snapshot() {
+    return {
+      orderId: this.orderId,
+      canonical: this.canonical,
+      canonicalOrderId: this.canonicalOrderId,
+      activeOrderToken: this.activeOrderToken,
+      serverCursor: this.serverCursor,
+      renderedCount: this.renderedCount,
+      nextCursor: this.nextCursor,
+      hasMore: this.hasMore,
+      lastEventId: this.lastEventId,
+      isComplete: this.isComplete,
+      error: this.error,
+      seenUrlsCount: this.seenUrls.size,
+    };
+  }
+}

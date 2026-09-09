@@ -1,7 +1,6 @@
 import {
   escapeHtml,
   safeUrl,
-  unwrapPayload,
   getQueryParam,
   skeletonsNeeded,
   canLoadNextPage,
@@ -9,6 +8,8 @@ import {
   shouldAutoContinue,
   retryDelayMs,
   SkeletonQueue,
+  SSEParser,
+  StreamStateReducer,
 } from "./search-core.js";
 
 const numSearchSkels = 10;
@@ -24,13 +25,25 @@ const CONSECUTIVE_FAILURES_BEFORE_BANNER = 3;
 // starts loading.
 const PRELOAD_MARGIN_PX = 500;
 
-let lastFetched = 0;
+let renderedCount = 0;
 let polling = false;
 let batchLoading = false; // prevents multiple skeleton triggers
 let currentTab = "general";
 let consecutiveFailures = 0;
 let hasMoreResults = true; // server said there could be another page; only fetch it once the user scrolls for it
-let lastBatchSize = 0; // results rendered by the most recent poll
+let lastBatchSize = 0; // distinct results rendered by the most recent page
+let retryTimer = null;
+
+// Page-wide state persists across pagination and reconnects.
+const seenUrls = new Set();
+const urlToDom = new Map();
+
+// A reducer and start position belong to one server window. A new page gets a
+// fresh reducer because cache event IDs restart; reconnects reuse it.
+let currentPageReducer = null;
+let nextPageStart = 0;
+let currentPageStart = 0;
+let currentPageOrderToken = null;
 
 const searchSkeletons = new SkeletonQueue();
 const imageSkeletons = new SkeletonQueue();
@@ -80,42 +93,35 @@ addEventListener("DOMContentLoaded", (event) => {
 
 async function startPolling(query) {
   polling = true;
-  await pollResults(query);
+  currentPageStart = nextPageStart;
+  currentPageReducer = new StreamStateReducer();
+  lastBatchSize = 0;
+  await streamResults(query);
 }
 
 function stopPolling() {
   polling = false;
-  batchLoading = false;
+  clearRetry();
+  // Only loadNextPage's finally handler releases batchLoading. Releasing it
+  // here can race the next auto-started page.
 }
 
-function renderEngineStatus(engines) {
-  const container = document.getElementById("engine-status");
-  if (!container) return;
-
-  if (!engines || engines.length === 0) {
-    container.innerHTML = "";
-    return;
+function clearRetry() {
+  if (retryTimer !== null) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
   }
+}
 
-  container.innerHTML = engines
-    .map(report => {
-      const status = (report.status && report.status.status) || "ok";
-      const detail = report.status && report.status.detail;
-      const label =
-        status === "ok" ? "responded"
-        : status === "timed_out" ? "timed out"
-        : status === "cooling_down" ? "paused"
-        : "failed";
+function scheduleRetry(query, status, message) {
+  if (!polling || retryTimer !== null) return;
 
-      return `
-        <div class="engine-status-row" title="${detail ? escapeHtml(detail) : ""}">
-          <span class="engine-status-dot ${escapeHtml(status)}"></span>
-          <span class="engine-status-name">${escapeHtml(report.engine)}</span>
-          <span class="engine-status-detail">${label}</span>
-        </div>
-      `;
-    })
-    .join("");
+  onPollFailure(message);
+  const delay = retryDelayMs(status, consecutiveFailures);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    if (polling) streamResults(query);
+  }, delay);
 }
 
 // Extracts `{error: "..."}` from a non-OK JSON response, falling back to
@@ -155,74 +161,216 @@ function onPollSuccess() {
   setErrorBanner(null);
 }
 
-async function pollResults(query) {
+async function streamResults(query) {
   if (!polling || query === undefined || query === null) return;
 
+  const params = new URLSearchParams({
+    tab: currentTab,
+    query,
+    start: currentPageStart,
+    count: pageSize(),
+  });
+  if (currentPageOrderToken !== null) {
+    params.set("order", currentPageOrderToken);
+  }
+  if (currentPageReducer.lastEventId !== null) {
+    params.set("after", currentPageReducer.lastEventId);
+  }
+
+  let receivedTerminal = false;
+
   try {
-    const res = await fetch(
-      `/query?tab=${currentTab}&query=${encodeURIComponent(query)}&start=${lastFetched}&count=${pageSize()}`
-    );
-
+    const res = await fetch(`/query/stream?${params}`);
     if (!res.ok) {
-      const message = await describeError(res);
-      onPollFailure(message);
-      setTimeout(
-        () => pollResults(query),
-        retryDelayMs(res.status, consecutiveFailures),
-      );
+      scheduleRetry(query, res.status, await describeError(res));
+      return;
+    }
+    if (!res.body) {
+      scheduleRetry(query, 0, "empty response");
       return;
     }
 
-    let data;
-    try {
-      data = await res.json();
-    } catch (err) {
-      onPollFailure("bad response");
-      setTimeout(
-        () => pollResults(query),
-        retryDelayMs(0, consecutiveFailures),
-      );
-      return;
+    const parser = new SSEParser();
+    const decoder = new TextDecoder();
+    const reader = res.body.getReader();
+    let markedSuccessful = false;
+
+    parser.on("frame", (frame) => {
+      currentPageReducer.processFrame(frame);
+
+      // Meta identifies the exact order being read. Keep it immediately so a
+      // disconnect before done reconnects to the same generation.
+      if (currentPageReducer.activeOrderToken !== null) {
+        currentPageOrderToken = currentPageReducer.activeOrderToken;
+      }
+
+      if (!markedSuccessful && frame.event !== "error") {
+        markedSuccessful = true;
+        onPollSuccess();
+      }
+
+      for (const action of currentPageReducer.actions) {
+        switch (action.type) {
+          case "append":
+            renderResult(action);
+            break;
+          case "updateAttribution":
+            updateResultAttribution(action);
+            break;
+          case "updateEngine":
+            renderEngineStatusIncremental(action.name, action.report);
+            break;
+          case "done":
+            receivedTerminal = true;
+            hasMoreResults = action.hasMore;
+            nextPageStart = action.nextCursor ?? currentPageReducer.serverCursor;
+            currentPageOrderToken = action.activeOrderId ?? currentPageOrderToken;
+            if (action.hasMore) {
+              stopPolling();
+              if (lastBatchSize === 0) dropUnfilledSkeletons();
+              watchForEnd();
+              scheduleContinue();
+            } else {
+              finishSearch();
+            }
+            break;
+          case "error":
+            receivedTerminal = true;
+            scheduleRetry(query, 0, action.message);
+            break;
+        }
+      }
+    });
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parser.feed(decoder.decode(value, { stream: true }));
     }
 
-    onPollSuccess();
+    const finalChunk = decoder.decode();
+    if (finalChunk) parser.feed(finalChunk);
+    parser.end();
 
-    const { results, engines, hasMore } = unwrapPayload(data);
-
-    renderEngineStatus(engines);
-
-    if (currentTab === "images") {
-      renderImageResults(results);
-    } else {
-      renderSearchResults(results);
-    }
-
-    // Only fetch this page — the next one is loaded when the user scrolls
-    // for it (see the `scroll` listener below), not automatically. Without
-    // this, a single search would recursively page through the *entire*
-    // result set, hammering the upstream engines with
-    // requests no one asked for.
-    hasMoreResults = hasMore;
-    if (hasMore) {
-      stopPolling();
-      // A batch that filled none of its placeholders would otherwise leave
-      // them sitting on the page as permanent "loading" rows.
-      if (lastBatchSize === 0) dropUnfilledSkeletons();
-      // Deliberately not started before the first batch renders: an observer
-      // set up against an empty page reports its marker as visible straight
-      // away and would fetch page 2 before the user asked for anything.
-      watchForEnd();
-      scheduleContinue();
-    } else {
-      finishSearch();
+    if (!receivedTerminal) {
+      scheduleRetry(query, 0, "stream disconnected");
     }
   } catch (err) {
-    onPollFailure("network error");
-    setTimeout(
-      () => pollResults(query),
-      retryDelayMs(0, consecutiveFailures),
-    );
+    if (!receivedTerminal) {
+      scheduleRetry(query, 0, "network error");
+    }
   }
+}
+
+function renderResult(action) {
+  const result = action.result;
+  const url = result.url || result.href;
+
+  // Check if we've already rendered this URL (page-global, persistent)
+  if (seenUrls.has(url)) {
+    return;
+  }
+
+  seenUrls.add(url);
+  lastBatchSize++;
+
+  // Get or create skeleton
+  const skeleton = currentTab === "images"
+    ? imageSkeletons.next(() => makeImageSkeleton())
+    : searchSkeletons.next(() => makeSearchSkeleton());
+
+  if (currentTab === "images") {
+    renderImageResult(skeleton, result, !!result.cached);
+  } else {
+    renderSearchResult(skeleton, result, !!result.cached);
+  }
+
+  urlToDom.set(url, skeleton);
+  renderedCount++;
+}
+
+function renderSearchResult(skeleton, result, cached) {
+  const enginesHtml = (result.engines || [])
+    .map(e => `<span class="engine-tag">${escapeHtml(e)}</span>`)
+    .join(" ");
+  const href = url(result.url);
+
+  skeleton.innerHTML = `
+    <a class="url_header" target="_blank" rel="noopener noreferrer" href="${href}">${escapeHtml(result.url)}</a>
+    <h3><a class="name" target="_blank" rel="noopener noreferrer" href="${href}">${escapeHtml(result.title)}</a></h3>
+    <p class="description">${escapeHtml(result.description)}</p>
+    <div class="engines">
+      ${enginesHtml}
+      ${cached ? '<span class="engine-tag cached">Cached ✓</span>' : ''}
+    </div>
+  `;
+  skeleton.className = "result";
+}
+
+function renderImageResult(skeleton, result, cached) {
+  const href = url(result.url);
+
+  skeleton.innerHTML = `
+    <a href="${href}" target="_blank" rel="noopener">
+      <img src="${href}" class="image-thumb" alt="" loading="lazy" decoding="async">
+    </a>
+
+    <figcaption>
+      <div class="image-title">${escapeHtml(result.title || "")}</div>
+      <div class="engines">
+        ${(result.engines || []).map(e => `<span class="engine-tag">${escapeHtml(e)}</span>`).join(" ")}
+        ${cached ? '<span class="engine-tag cached">Cached ✓</span>' : ''}
+      </div>
+    </figcaption>
+  `;
+
+  skeleton.className = "image-result";
+}
+
+function updateResultAttribution(action) {
+  const domElement = urlToDom.get(action.url);
+  const enginesContainer = domElement && domElement.querySelector(".engines");
+  if (!enginesContainer) return;
+
+  const cachedTag = enginesContainer.querySelector(".engine-tag.cached");
+  enginesContainer.replaceChildren();
+
+  for (const engine of action.engines || []) {
+    const tag = document.createElement("span");
+    tag.className = "engine-tag";
+    tag.textContent = engine;
+    enginesContainer.appendChild(tag);
+  }
+  if (cachedTag) enginesContainer.appendChild(cachedTag);
+}
+
+function renderEngineStatusIncremental(engineName, report) {
+  const container = document.getElementById("engine-status");
+  if (!container) return;
+
+  const status = (report.status && report.status.status) || "ok";
+  const detail = report.status && report.status.detail;
+  const label =
+    status === "ok" ? "responded"
+    : status === "timed_out" ? "timed out"
+    : status === "cooling_down" ? "paused"
+    : "failed";
+
+  let row = Array.from(container.querySelectorAll(".engine-status-row"))
+    .find(candidate => candidate.dataset.engine === engineName);
+  if (!row) {
+    row = document.createElement("div");
+    row.className = "engine-status-row";
+    row.dataset.engine = engineName;
+    container.appendChild(row);
+  }
+
+  row.title = detail || "";
+  row.innerHTML = `
+    <span class="engine-status-dot ${escapeHtml(status)}"></span>
+    <span class="engine-status-name">${escapeHtml(engineName)}</span>
+    <span class="engine-status-detail">${label}</span>
+  `;
 }
 
 // Called once a search has definitively run out of results (`hasMore` is
@@ -235,7 +383,7 @@ function finishSearch() {
   stopWatchingForEnd();
   dropUnfilledSkeletons();
 
-  if (lastFetched === 0) {
+  if (renderedCount === 0) {
     const container = document.querySelector(currentTab === "images" ? ".image-gallery" : ".results-container");
     const empty = document.createElement("p");
     empty.className = "empty-state";
@@ -293,55 +441,6 @@ function createImageSkeletons(count) {
   }
 }
 
-function renderSearchResults(results) {
-  results.forEach((result) => {
-    const skeleton = searchSkeletons.next(makeSearchSkeleton);
-
-    const enginesHtml = result.engines
-      .map(e => `<span class="engine-tag">${escapeHtml(e)}</span>`)
-      .join(" ");
-    const href = url(result.url);
-
-    skeleton.innerHTML = `
-      <a class="url_header" target="_blank" rel="noopener noreferrer" href="${href}">${escapeHtml(result.url)}</a>
-      <h3><a class="name" target="_blank" rel="noopener noreferrer" href="${href}">${escapeHtml(result.title)}</a></h3>
-      <p class="description">${escapeHtml(result.description)}</p>
-      <div class="engines">
-        ${enginesHtml}
-        ${result.cached ? '<span class="engine-tag cached">Cached ✓</span>' : ''}
-      </div>
-    `;
-    skeleton.className = "result"; // remove skeleton styles
-  });
-
-  lastFetched += results.length;
-  lastBatchSize = results.length;
-}
-
-function renderImageResults(results) {
-  results.forEach((result) => {
-    const skeleton = imageSkeletons.next(makeImageSkeleton);
-    const href = url(result.url);
-
-    skeleton.innerHTML = `
-      <a href="${href}" target="_blank" rel="noopener">
-        <img src="${href}" class="image-thumb" alt="" loading="lazy" decoding="async">
-      </a>
-
-      <figcaption>
-        <div class="image-title">${escapeHtml(result.title || "")}</div>
-        <div class="engines">
-          ${result.engines.map(e => `<span class="engine-tag">${escapeHtml(e)}</span>`).join(" ")}
-          ${result.cached ? '<span class="engine-tag cached">Cached ✓</span>' : ''}
-        </div>
-      </figcaption>
-    `;
-
-    skeleton.className = "image-result";
-  });
-  lastFetched += results.length;
-  lastBatchSize = results.length;
-}
 
 // Pulls off any placeholders the current tab has left unfilled. Called both
 // when the results run out for good and when a batch comes back empty — either
@@ -405,6 +504,7 @@ function loadNextPage() {
   if (!canLoadNextPage({ batchLoading, polling, hasMoreResults })) return;
 
   batchLoading = true; // mark that we are loading
+  lastBatchSize = 0; // Reset for the new page
 
   if (currentTab === "images") {
     createImageSkeletons(skeletonsNeeded(imageSkeletons.length, pageSize()));
