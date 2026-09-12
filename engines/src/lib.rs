@@ -160,6 +160,20 @@ pub async fn clean_cache(max_age: Duration) -> Result<u64, FetchError> {
     Ok(search_cache::clean_cache(pool, max_age).await?)
 }
 
+pub use search_engines::proxy::{ProxyStats, stats as proxy_stats};
+
+pub fn proxy_health_enabled() -> bool {
+    search_engines::proxy::enabled()
+        || matches!(
+            std::env::var("ENGINE_PROXY_HEALTH_ENABLED").as_deref(),
+            Ok("1")
+        )
+}
+
+pub async fn refresh_proxies() -> Result<ProxyStats, String> {
+    search_engines::proxy::refresh_once().await
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedResult {
     url: String,
@@ -192,6 +206,7 @@ pub struct SearchResult {
     pub description: String,
     pub engines: Vec<String>,
     pub cached: bool,
+    pub score: u32,
 }
 
 impl PartialEq for SearchResult {
@@ -576,7 +591,10 @@ impl Ranker<CachedImage> for UrlSortRanker {
 /// Was one hand-written source struct per engine; with twenty-odd adapters
 /// that became twenty identical copies of the same six-line mapping, so the
 /// conversion lives here once instead.
-struct TextSource<E>(E);
+struct TextSource<E> {
+    engine: E,
+    routed_query: Option<String>,
+}
 
 #[async_trait]
 impl<E> EngineSource<CachedResult> for TextSource<E>
@@ -584,12 +602,16 @@ where
     E: SearchEngine + Sync + 'static,
 {
     fn name(&self) -> &'static str {
-        self.0.name()
+        self.engine.name()
     }
 
     async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<CachedResult>, String> {
-        self.0
-            .search_results(query, start, ENGINE_PAGE_HINT)
+        self.engine
+            .search_results(
+                self.routed_query.as_deref().unwrap_or(query),
+                start,
+                ENGINE_PAGE_HINT,
+            )
             .await
             .map(|rows| {
                 rows.into_iter()
@@ -688,6 +710,122 @@ fn looks_like_stackexchange_query(query: &str) -> bool {
         })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryIntent {
+    General,
+    GitForge,
+    Wiki,
+    Package(SearchEngines),
+}
+
+fn query_tokens(query: &str) -> impl Iterator<Item = String> + '_ {
+    query.split_whitespace().map(|token| {
+        token
+            .trim_matches(|character: char| !character.is_alphanumeric() && character != '.')
+            .to_lowercase()
+    })
+}
+
+fn query_intent(query: &str) -> QueryIntent {
+    let lower = query.to_lowercase();
+    let tokens: Vec<_> = query_tokens(query).collect();
+
+    if lower.contains("github.com")
+        || ["github", "gh", "repo", "repository", "gitlab", "codeberg"]
+            .iter()
+            .any(|hint| tokens.iter().any(|token| token == hint))
+    {
+        return QueryIntent::GitForge;
+    }
+    if ["wiki", "wikipedia", "encyclopedia"]
+        .iter()
+        .any(|hint| tokens.iter().any(|token| token == hint))
+    {
+        return QueryIntent::Wiki;
+    }
+
+    let package_hints: &[(&[&str], SearchEngines)] = &[
+        (&["npm", "node", "javascript"], SearchEngines::Npm),
+        (
+            &["cargo", "crate", "crates", "rust"],
+            SearchEngines::CratesIo,
+        ),
+        (&["pypi", "pip", "python"], SearchEngines::PyPi),
+        (&["rubygems", "gem", "ruby"], SearchEngines::RubyGems),
+        (&["packagist", "composer", "php"], SearchEngines::Packagist),
+        (&["maven", "gradle", "java"], SearchEngines::MavenCentral),
+        (&["nuget", ".net", "dotnet", "csharp"], SearchEngines::NuGet),
+        (&["hex", "elixir", "erlang"], SearchEngines::HexPm),
+        (&["docker", "container"], SearchEngines::DockerHub),
+        (&["golang", "go"], SearchEngines::GoPkg),
+    ];
+    package_hints
+        .iter()
+        .find(|(hints, _)| {
+            hints
+                .iter()
+                .any(|hint| tokens.iter().any(|token| token == hint))
+        })
+        .map_or(QueryIntent::General, |(_, engine)| {
+            QueryIntent::Package(*engine)
+        })
+}
+
+fn is_routing_token(token: &str, intent: QueryIntent) -> bool {
+    let hints: &[&str] = match intent {
+        QueryIntent::GitForge => &[
+            "github",
+            "github.com",
+            "gh",
+            "repo",
+            "repository",
+            "gitlab",
+            "codeberg",
+        ],
+        QueryIntent::Wiki => &["wiki", "wikipedia", "encyclopedia"],
+        QueryIntent::Package(SearchEngines::Npm) => &["npm", "node", "javascript"],
+        QueryIntent::Package(SearchEngines::CratesIo) => &["cargo", "crate", "crates", "rust"],
+        QueryIntent::Package(SearchEngines::PyPi) => &["pypi", "pip", "python"],
+        QueryIntent::Package(SearchEngines::RubyGems) => &["rubygems", "gem", "ruby"],
+        QueryIntent::Package(SearchEngines::Packagist) => &["packagist", "composer", "php"],
+        QueryIntent::Package(SearchEngines::MavenCentral) => &["maven", "gradle", "java"],
+        QueryIntent::Package(SearchEngines::NuGet) => &["nuget", ".net", "dotnet", "csharp"],
+        QueryIntent::Package(SearchEngines::HexPm) => &["hex", "elixir", "erlang"],
+        QueryIntent::Package(SearchEngines::DockerHub) => &["docker", "container"],
+        QueryIntent::Package(SearchEngines::GoPkg) => &["golang", "go"],
+        QueryIntent::General | QueryIntent::Package(_) => &[],
+    };
+    hints.contains(&token)
+}
+
+fn routed_query(query: &str, engine: SearchEngines) -> Option<String> {
+    let intent = query_intent(query);
+    let targeted = match intent {
+        QueryIntent::GitForge => matches!(
+            engine,
+            SearchEngines::GitHub | SearchEngines::GitLab | SearchEngines::Codeberg
+        ),
+        QueryIntent::Wiki => matches!(engine, SearchEngines::Wikipedia | SearchEngines::ArchWiki),
+        QueryIntent::Package(target) => engine == target,
+        QueryIntent::General => false,
+    };
+    if !targeted {
+        return None;
+    }
+
+    let cleaned = query
+        .split_whitespace()
+        .filter(|token| {
+            let normalized = token
+                .trim_matches(|character: char| !character.is_alphanumeric() && character != '.')
+                .to_lowercase();
+            !is_routing_token(&normalized, intent)
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!cleaned.is_empty() && cleaned != query).then_some(cleaned)
+}
+
 impl SearchEngines {
     /// Every known text-search engine, including quota-sensitive sources.
     pub fn all() -> Vec<Self> {
@@ -717,15 +855,34 @@ impl SearchEngines {
         ]
     }
 
-    /// Engines used when callers do not choose a set explicitly. GitHub and
-    /// the package registries stay enabled for broad queries (so `pangolin`
-    /// can find its repository), while Stack Exchange's unusually small
-    /// unauthenticated daily quota is reserved for question/error-shaped
-    /// searches where it is most likely to add value.
+    /// Engines used when callers do not choose a set explicitly. Explicit
+    /// site/package hints narrow the fanout; unknown queries keep broad web,
+    /// wiki, forge, and documentation coverage without querying every registry.
     pub fn defaults_for_query(query: &str) -> Vec<Self> {
-        let mut engines = Self::all();
-        if !looks_like_stackexchange_query(query) {
-            engines.retain(|engine| *engine != Self::StackExchange);
+        let mut engines = match query_intent(query) {
+            QueryIntent::GitForge => vec![
+                Self::Brave,
+                Self::DuckDuckGo,
+                Self::GitHub,
+                Self::GitLab,
+                Self::Codeberg,
+            ],
+            QueryIntent::Wiki => vec![Self::Brave, Self::DuckDuckGo, Self::Wikipedia],
+            QueryIntent::Package(package) => {
+                vec![Self::Brave, Self::DuckDuckGo, Self::GitHub, package]
+            }
+            QueryIntent::General => vec![
+                Self::Brave,
+                Self::DuckDuckGo,
+                Self::GitHub,
+                Self::Wikipedia,
+                Self::Mdn,
+                Self::ArchWiki,
+            ],
+        };
+
+        if looks_like_stackexchange_query(query) {
+            engines.push(Self::StackExchange);
         }
         engines
     }
@@ -757,30 +914,39 @@ impl SearchEngines {
         }
     }
 
-    fn source(self) -> Arc<dyn EngineSource<CachedResult>> {
+    fn source(self, query: &str) -> Arc<dyn EngineSource<CachedResult>> {
+        let routed_query = routed_query(query, self);
+        macro_rules! source {
+            ($engine:expr) => {
+                Arc::new(TextSource {
+                    engine: $engine,
+                    routed_query,
+                })
+            };
+        }
         match self {
-            Self::Brave => Arc::new(TextSource(Brave)),
-            Self::DuckDuckGo => Arc::new(TextSource(DuckDuckGo)),
-            Self::GitHub => Arc::new(TextSource(GitHub)),
-            Self::GitLab => Arc::new(TextSource(GitLab)),
-            Self::Codeberg => Arc::new(TextSource(Codeberg)),
-            Self::StackExchange => Arc::new(TextSource(StackExchange)),
-            Self::HackerNews => Arc::new(TextSource(HackerNews)),
-            Self::Lobsters => Arc::new(TextSource(Lobsters)),
-            Self::Wikipedia => Arc::new(TextSource(Wikipedia)),
-            Self::ArchWiki => Arc::new(TextSource(ArchWiki)),
-            Self::Mdn => Arc::new(TextSource(Mdn)),
-            Self::CratesIo => Arc::new(TextSource(CratesIo)),
-            Self::Npm => Arc::new(TextSource(Npm)),
-            Self::PyPi => Arc::new(TextSource(PyPi)),
-            Self::RubyGems => Arc::new(TextSource(RubyGems)),
-            Self::Packagist => Arc::new(TextSource(Packagist)),
-            Self::MavenCentral => Arc::new(TextSource(MavenCentral)),
-            Self::NuGet => Arc::new(TextSource(NuGet)),
-            Self::HexPm => Arc::new(TextSource(HexPm)),
-            Self::DockerHub => Arc::new(TextSource(DockerHub)),
-            Self::NixPackages => Arc::new(TextSource(NixPackages)),
-            Self::GoPkg => Arc::new(TextSource(GoPkg)),
+            Self::Brave => source!(Brave),
+            Self::DuckDuckGo => source!(DuckDuckGo),
+            Self::GitHub => source!(GitHub),
+            Self::GitLab => source!(GitLab),
+            Self::Codeberg => source!(Codeberg),
+            Self::StackExchange => source!(StackExchange),
+            Self::HackerNews => source!(HackerNews),
+            Self::Lobsters => source!(Lobsters),
+            Self::Wikipedia => source!(Wikipedia),
+            Self::ArchWiki => source!(ArchWiki),
+            Self::Mdn => source!(Mdn),
+            Self::CratesIo => source!(CratesIo),
+            Self::Npm => source!(Npm),
+            Self::PyPi => source!(PyPi),
+            Self::RubyGems => source!(RubyGems),
+            Self::Packagist => source!(Packagist),
+            Self::MavenCentral => source!(MavenCentral),
+            Self::NuGet => source!(NuGet),
+            Self::HexPm => source!(HexPm),
+            Self::DockerHub => source!(DockerHub),
+            Self::NixPackages => source!(NixPackages),
+            Self::GoPkg => source!(GoPkg),
         }
     }
 }
@@ -938,8 +1104,9 @@ fn cooling_reports<E: Copy>(
 /// function doesn't have); Results entries are converted from the merge
 /// cache's row type via `convert`.
 fn map_cache_event<R: CacheableRow, T>(
+    query: &str,
     event: CacheEvent<R>,
-    convert: fn(MergedRowResult<R>) -> T,
+    convert: fn(&str, MergedRowResult<R>) -> T,
 ) -> StreamEvent<T> {
     match event {
         CacheEvent::Metadata {
@@ -956,7 +1123,7 @@ fn map_cache_event<R: CacheableRow, T>(
                 .into_iter()
                 .map(|pr| PositionedResult {
                     position: pr.position,
-                    result: convert(pr.row),
+                    result: convert(query, pr.row),
                 })
                 .collect(),
         }),
@@ -1038,8 +1205,9 @@ impl StreamAccumulator {
 fn map_and_observe<R: CacheableRow, T>(
     acc: &mut StreamAccumulator,
     usable_is_empty: bool,
+    query: &str,
     event: CacheEvent<R>,
-    convert: fn(MergedRowResult<R>) -> T,
+    convert: fn(&str, MergedRowResult<R>) -> T,
 ) -> (StreamEvent<T>, bool) {
     acc.observe(&event);
     let is_done = matches!(event, CacheEvent::Done { .. });
@@ -1047,10 +1215,10 @@ fn map_and_observe<R: CacheableRow, T>(
     let mapped = if is_done {
         match acc.terminal_error_message(usable_is_empty) {
             Some(message) => StreamEvent::Error(StreamErrorPayload { message }),
-            None => map_cache_event(event, convert),
+            None => map_cache_event(query, event, convert),
         }
     } else {
-        map_cache_event(event, convert)
+        map_cache_event(query, event, convert)
     };
     (mapped, is_terminal)
 }
@@ -1066,10 +1234,11 @@ fn map_and_observe<R: CacheableRow, T>(
 /// outbound receiver is dropped, so the owner's outcomes are still recorded
 /// even if the HTTP-side subscriber disconnects first.
 fn build_stream<R, T, F>(
+    query: String,
     subscription: CacheSubscription<R>,
     cooling_reports: Vec<EngineReport>,
     usable_is_empty: bool,
-    convert: fn(MergedRowResult<R>) -> T,
+    convert: fn(&str, MergedRowResult<R>) -> T,
     record: F,
 ) -> SearchStream<T>
 where
@@ -1096,7 +1265,8 @@ where
 
     for seq_event in snapshot {
         let SequencedCacheEvent { sequence, event } = seq_event;
-        let (mapped, is_terminal) = map_and_observe(&mut acc, usable_is_empty, event, convert);
+        let (mapped, is_terminal) =
+            map_and_observe(&mut acc, usable_is_empty, &query, event, convert);
         out_snapshot.push(SequencedStreamEvent {
             sequence: Some(sequence),
             event: mapped,
@@ -1128,7 +1298,8 @@ where
         let mut acc = acc;
         while let Some(seq_event) = live.recv().await {
             let SequencedCacheEvent { sequence, event } = seq_event;
-            let (mapped, is_terminal) = map_and_observe(&mut acc, usable_is_empty, event, convert);
+            let (mapped, is_terminal) =
+                map_and_observe(&mut acc, usable_is_empty, &query, event, convert);
             // Ignore send errors: keep draining so the owner's outcomes are
             // still recorded exactly once even if the downstream (HTTP)
             // receiver disconnected mid-stream.
@@ -1243,7 +1414,7 @@ impl SearchBuilder {
         // down an engine instead of just erroring out, so this call is never
         // skipped even when every engine is currently cooling.
         let sources: Vec<Arc<dyn EngineSource<CachedResult>>> =
-            usable.iter().map(|e| e.source()).collect();
+            usable.iter().map(|e| e.source(&self.query)).collect();
 
         let extend = text_cache()
             .await
@@ -1278,13 +1449,7 @@ impl SearchBuilder {
         let results = extend
             .rows
             .into_iter()
-            .map(|r| SearchResult {
-                url: r.value.url,
-                title: r.value.title,
-                description: r.value.description,
-                engines: r.engines,
-                cached: r.cached,
-            })
+            .map(|r| to_search_result(&self.query, r))
             .collect();
 
         Ok(SearchResponse {
@@ -1309,7 +1474,7 @@ impl SearchBuilder {
 
         let (usable, cooling) = partition_by_cooldown(&engines, SearchEngines::name);
         let sources: Vec<Arc<dyn EngineSource<CachedResult>>> =
-            usable.iter().map(|e| e.source()).collect();
+            usable.iter().map(|e| e.source(&self.query)).collect();
         let cooling_reports = cooling_reports(&cooling, SearchEngines::name);
 
         let subscription = text_cache()
@@ -1332,6 +1497,7 @@ impl SearchBuilder {
         };
 
         Ok(build_stream(
+            self.query,
             subscription,
             cooling_reports,
             usable_is_empty,
@@ -1341,17 +1507,20 @@ impl SearchBuilder {
     }
 }
 
-fn to_search_result(row: MergedRowResult<CachedResult>) -> SearchResult {
+fn to_search_result(query: &str, row: MergedRowResult<CachedResult>) -> SearchResult {
+    let words = query_words(query);
+    let score = cached_result_score(&row.value, query, &words);
     SearchResult {
         url: row.value.url,
         title: row.value.title,
         description: row.value.description,
         engines: row.engines,
         cached: row.cached,
+        score,
     }
 }
 
-fn to_image_result(row: MergedRowResult<CachedImage>) -> ImageResult {
+fn to_image_result(_query: &str, row: MergedRowResult<CachedImage>) -> ImageResult {
     ImageResult {
         url: row.value.url,
         title: row.value.title,
@@ -1532,6 +1701,7 @@ impl ImageSearchBuilder {
         };
 
         Ok(build_stream(
+            self.query,
             subscription,
             cooling_reports,
             usable_is_empty,
@@ -1558,10 +1728,63 @@ mod test {
     }
 
     #[test]
-    fn broad_defaults_keep_github_but_reserve_stackexchange_quota() {
-        let engines = SearchEngines::defaults_for_query("pangolin");
+    fn github_hint_narrows_defaults_to_forges_and_web() {
+        let engines = SearchEngines::defaults_for_query("ripgrep github");
+
+        assert_eq!(
+            engines,
+            vec![
+                SearchEngines::Brave,
+                SearchEngines::DuckDuckGo,
+                SearchEngines::GitHub,
+                SearchEngines::GitLab,
+                SearchEngines::Codeberg,
+            ]
+        );
+    }
+
+    #[test]
+    fn wiki_hint_excludes_package_registries() {
+        let engines = SearchEngines::defaults_for_query("quantum computing wikipedia");
+
+        assert!(engines.contains(&SearchEngines::Wikipedia));
+        assert!(!engines.contains(&SearchEngines::Npm));
+        assert!(!engines.contains(&SearchEngines::CratesIo));
+    }
+
+    #[test]
+    fn package_hint_selects_only_matching_registry() {
+        let engines = SearchEngines::defaults_for_query("express npm");
+
+        assert_eq!(
+            engines,
+            vec![
+                SearchEngines::Brave,
+                SearchEngines::DuckDuckGo,
+                SearchEngines::GitHub,
+                SearchEngines::Npm,
+            ]
+        );
+    }
+
+    #[test]
+    fn routed_query_removes_intent_hint_for_target_engine() {
+        assert_eq!(
+            routed_query("ripgrep github", SearchEngines::GitHub),
+            Some("ripgrep".to_string())
+        );
+        assert_eq!(routed_query("ripgrep github", SearchEngines::Brave), None);
+    }
+
+    #[test]
+    fn general_defaults_keep_web_and_high_signal_sources_without_package_flood() {
+        let engines = SearchEngines::defaults_for_query("cats");
+
+        assert!(engines.contains(&SearchEngines::Brave));
+        assert!(engines.contains(&SearchEngines::Wikipedia));
         assert!(engines.contains(&SearchEngines::GitHub));
-        assert!(!engines.contains(&SearchEngines::StackExchange));
+        assert!(!engines.contains(&SearchEngines::Npm));
+        assert!(engines.len() < SearchEngines::all().len());
     }
 
     #[test]
@@ -1779,6 +2002,7 @@ mod test {
             description: "مرحبا بالعالم (RTL text) 🎉".to_string(),
             engines: vec!["Brave".to_string()],
             cached: false,
+            score: 0,
         };
 
         let json = serde_json::to_string(&result).unwrap();
@@ -1877,7 +2101,7 @@ mod test {
             order_kind: OrderKind::Canonical,
             cached: true,
         };
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Meta(meta) => {
                 assert_eq!(meta.order_id, 42);
                 assert!(meta.canonical);
@@ -1891,7 +2115,7 @@ mod test {
             order_kind: OrderKind::Arrival,
             cached: false,
         };
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Meta(meta) => assert!(!meta.canonical),
             other => panic!("expected Meta, got {other:?}"),
         }
@@ -1904,7 +2128,7 @@ mod test {
             positioned(7, "https://b.example"),
         ]);
 
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Results(results) => {
                 assert_eq!(results.entries.len(), 2);
                 assert_eq!(results.entries[0].position, 3);
@@ -1923,7 +2147,7 @@ mod test {
             url: "https://a.example".into(),
             engines: vec!["Brave".into(), "DuckDuckGo".into()],
         };
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Attribution(a) => {
                 assert_eq!(a.position, 2);
                 assert_eq!(a.url, "https://a.example");
@@ -1939,7 +2163,7 @@ mod test {
             engine: "Brave".into(),
             outcome: EngineOutcome::TimedOut,
         };
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Engine(report) => {
                 assert_eq!(report.engine, "Brave");
                 assert!(matches!(report.status, EngineStatus::TimedOut));
@@ -1956,7 +2180,7 @@ mod test {
             next_cursor: 20,
             has_more: true,
         };
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Done(done) => {
                 assert_eq!(done.active_order_id, 5);
                 assert_eq!(done.canonical_order_id, Some(9));
@@ -1970,7 +2194,7 @@ mod test {
     #[test]
     fn map_cache_event_maps_error() {
         let event: CacheEvent<CachedResult> = CacheEvent::Error("db exploded".into());
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Error(e) => assert_eq!(e.message, "db exploded"),
             other => panic!("expected Error, got {other:?}"),
         }
@@ -1980,7 +2204,7 @@ mod test {
     fn map_and_observe_substitutes_error_when_no_usable_engines_and_no_results() {
         let mut acc = StreamAccumulator::default();
         let (mapped, is_terminal) =
-            map_and_observe(&mut acc, true, done_event(0), to_search_result);
+            map_and_observe(&mut acc, true, "test", done_event(0), to_search_result);
         assert!(is_terminal);
         match mapped {
             StreamEvent::Error(e) => {
@@ -1997,10 +2221,10 @@ mod test {
             engine: "Brave".into(),
             outcome: EngineOutcome::Failed("boom".into()),
         };
-        map_and_observe(&mut acc, false, engine_event, to_search_result);
+        map_and_observe(&mut acc, false, "test", engine_event, to_search_result);
 
         let (mapped, is_terminal) =
-            map_and_observe(&mut acc, false, done_event(0), to_search_result);
+            map_and_observe(&mut acc, false, "test", done_event(0), to_search_result);
         assert!(is_terminal);
         match mapped {
             StreamEvent::Error(e) => {
@@ -2015,10 +2239,10 @@ mod test {
         let mut acc = StreamAccumulator::default();
         let results: CacheEvent<CachedResult> =
             CacheEvent::Results(vec![positioned(0, "https://a.example")]);
-        map_and_observe(&mut acc, false, results, to_search_result);
+        map_and_observe(&mut acc, false, "test", results, to_search_result);
 
         let (mapped, is_terminal) =
-            map_and_observe(&mut acc, false, done_event(1), to_search_result);
+            map_and_observe(&mut acc, false, "test", done_event(1), to_search_result);
         assert!(is_terminal);
         assert!(matches!(mapped, StreamEvent::Done(_)));
     }
@@ -2027,7 +2251,8 @@ mod test {
     fn map_and_observe_marks_error_event_as_terminal_without_substitution() {
         let mut acc = StreamAccumulator::default();
         let event: CacheEvent<CachedResult> = CacheEvent::Error("db exploded".into());
-        let (mapped, is_terminal) = map_and_observe(&mut acc, false, event, to_search_result);
+        let (mapped, is_terminal) =
+            map_and_observe(&mut acc, false, "test", event, to_search_result);
         assert!(is_terminal);
         match mapped {
             StreamEvent::Error(e) => assert_eq!(e.message, "db exploded"),
@@ -2046,7 +2271,14 @@ mod test {
             engine: "DuckDuckGo".into(),
             status: EngineStatus::CoolingDown("retry in 30s".into()),
         }];
-        let mut stream = build_stream(subscription, cooling, false, to_search_result, |_| {});
+        let mut stream = build_stream(
+            "test".into(),
+            subscription,
+            cooling,
+            false,
+            to_search_result,
+            |_| {},
+        );
 
         assert_eq!(stream.snapshot.len(), 1);
         assert_eq!(stream.snapshot[0].sequence, None);
@@ -2087,9 +2319,16 @@ mod test {
 
         let record_calls = Arc::new(StdMutex::new(0));
         let record_calls_clone = record_calls.clone();
-        let mut stream = build_stream(subscription, vec![], false, to_search_result, move |_| {
-            *record_calls_clone.lock().unwrap() += 1;
-        });
+        let mut stream = build_stream(
+            "test".into(),
+            subscription,
+            vec![],
+            false,
+            to_search_result,
+            move |_| {
+                *record_calls_clone.lock().unwrap() += 1;
+            },
+        );
 
         // Snapshot processing is synchronous: by the time `build_stream`
         // returns, every event -- including the terminal `Done` -- is
@@ -2118,9 +2357,16 @@ mod test {
 
         let record_calls = Arc::new(StdMutex::new(0));
         let record_calls_clone = record_calls.clone();
-        build_stream(subscription, vec![], true, to_search_result, move |_| {
-            *record_calls_clone.lock().unwrap() += 1;
-        });
+        build_stream(
+            "test".into(),
+            subscription,
+            vec![],
+            true,
+            to_search_result,
+            move |_| {
+                *record_calls_clone.lock().unwrap() += 1;
+            },
+        );
 
         assert_eq!(*record_calls.lock().unwrap(), 0);
     }
@@ -2143,9 +2389,16 @@ mod test {
 
         let record_calls = Arc::new(StdMutex::new(0));
         let record_calls_clone = record_calls.clone();
-        let mut stream = build_stream(subscription, vec![], false, to_search_result, move |_| {
-            *record_calls_clone.lock().unwrap() += 1;
-        });
+        let mut stream = build_stream(
+            "test".into(),
+            subscription,
+            vec![],
+            false,
+            to_search_result,
+            move |_| {
+                *record_calls_clone.lock().unwrap() += 1;
+            },
+        );
 
         assert!(stream.snapshot.is_empty());
 
@@ -2196,11 +2449,18 @@ mod test {
 
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let done_tx = StdMutex::new(Some(done_tx));
-        let stream = build_stream(subscription, vec![], false, to_search_result, move |_| {
-            if let Some(done_tx) = done_tx.lock().unwrap().take() {
-                let _ = done_tx.send(());
-            }
-        });
+        let stream = build_stream(
+            "test".into(),
+            subscription,
+            vec![],
+            false,
+            to_search_result,
+            move |_| {
+                if let Some(done_tx) = done_tx.lock().unwrap().take() {
+                    let _ = done_tx.send(());
+                }
+            },
+        );
 
         // Simulate an HTTP subscriber disconnecting mid-stream: the owner
         // task must keep draining `live` and still record outcomes exactly

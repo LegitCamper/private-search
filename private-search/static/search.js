@@ -7,6 +7,8 @@ import {
   isWithinPreloadRange,
   shouldAutoContinue,
   retryDelayMs,
+  shouldFlushFirstPaint,
+  sortBufferedByScore,
   SkeletonQueue,
   SSEParser,
   StreamStateReducer,
@@ -24,6 +26,7 @@ const CONSECUTIVE_FAILURES_BEFORE_BANNER = 3;
 // How close to the end of the results the user has to get before the next page
 // starts loading.
 const PRELOAD_MARGIN_PX = 500;
+const HOLD_MS = 1200;
 
 let renderedCount = 0;
 let polling = false;
@@ -194,6 +197,17 @@ async function streamResults(query) {
     const decoder = new TextDecoder();
     const reader = res.body.getReader();
     let markedSuccessful = false;
+    let firstPaintBuffer = [];
+    let firstPaintStartedAt = null;
+    let firstPaintTimer = null;
+    let firstPaintFlushed = currentPageStart !== 0;
+    const flushFirstPaint = () => {
+      if (firstPaintFlushed) return;
+      firstPaintFlushed = true;
+      if (firstPaintTimer !== null) clearTimeout(firstPaintTimer);
+      for (const action of sortBufferedByScore(firstPaintBuffer)) renderResult(action);
+      firstPaintBuffer = [];
+    };
 
     parser.on("frame", (frame) => {
       currentPageReducer.processFrame(frame);
@@ -212,7 +226,24 @@ async function streamResults(query) {
       for (const action of currentPageReducer.actions) {
         switch (action.type) {
           case "append":
-            renderResult(action);
+            if (!firstPaintFlushed && !currentPageReducer.cached) {
+              firstPaintBuffer.push(action);
+              if (firstPaintStartedAt === null) {
+                firstPaintStartedAt = performance.now();
+                firstPaintTimer = setTimeout(flushFirstPaint, HOLD_MS);
+              }
+              const flushNow = shouldFlushFirstPaint({
+                elapsedMs: performance.now() - firstPaintStartedAt,
+                holdMs: HOLD_MS,
+                isComplete: currentPageReducer.isComplete,
+                bufferedCount: firstPaintBuffer.length,
+                pageSize: pageSize(),
+              });
+              if (flushNow) flushFirstPaint();
+            } else {
+              flushFirstPaint();
+              renderResult(action);
+            }
             break;
           case "updateAttribution":
             updateResultAttribution(action);
@@ -221,6 +252,7 @@ async function streamResults(query) {
             renderEngineStatusIncremental(action.name, action.report);
             break;
           case "done":
+            flushFirstPaint();
             receivedTerminal = true;
             hasMoreResults = action.hasMore;
             nextPageStart = action.nextCursor ?? currentPageReducer.serverCursor;
@@ -235,6 +267,7 @@ async function streamResults(query) {
             }
             break;
           case "error":
+            flushFirstPaint();
             receivedTerminal = true;
             scheduleRetry(query, 0, action.message);
             break;

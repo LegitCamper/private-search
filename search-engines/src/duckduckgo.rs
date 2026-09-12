@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::{
-    BlockKind, EngineError, EngineInfo, RawResult, SearchEngine, body_or_block, browser_client,
-    parse_search,
+    BlockKind, EngineError, EngineInfo, RawResult, SearchEngine, body_or_block, parse_search,
+    proxy::{self, Plan, Route, RouteId},
 };
 
 #[derive(Clone)]
@@ -20,7 +20,10 @@ const POST_URL: &str = "https://html.duckduckgo.com/html/";
 const VQD_TTL: Duration = Duration::from_secs(60 * 60);
 // Keep tokens in this bounded, process-local map because `search-engines` is
 // the pure adapter layer and must not depend on the project's SQLite cache.
-static VQD_CACHE: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+/// A cached `vqd` pagination token, the route that earned it, and when it was
+/// stored — pages 2+ must replay the same route or the token is rejected.
+type VqdEntry = (String, RouteId, Instant);
+static VQD_CACHE: OnceLock<Mutex<HashMap<String, VqdEntry>>> = OnceLock::new();
 
 impl EngineInfo for DuckDuckGo {
     fn name(&self) -> &'static str {
@@ -38,28 +41,36 @@ fn extract_vqd(html: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn cached_vqd(query: &str) -> Option<String> {
+fn cached_vqd(query: &str) -> Option<(String, RouteId)> {
     let cache = VQD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().ok()?;
     let now = Instant::now();
-    let (vqd, stored_at) = cache
+    let (vqd, route, stored_at) = cache
         .get_key_value(query)
-        .map(|(_, (vqd, stored_at))| (vqd.clone(), *stored_at))?;
+        .map(|(_, (vqd, route, stored_at))| (vqd.clone(), route.clone(), *stored_at))?;
     if now.duration_since(stored_at) >= VQD_TTL {
         cache.remove(query);
         return None;
     }
-    Some(vqd)
+    Some((vqd, route))
 }
 
-fn store_vqd(query: &str, vqd: String) {
+fn store_vqd(query: &str, vqd: String, route: RouteId) {
     let cache = VQD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(mut cache) = cache.lock() else {
         return;
     };
     let now = Instant::now();
-    cache.retain(|_, (_, stored_at)| now.duration_since(*stored_at) < VQD_TTL);
-    cache.insert(query.to_owned(), (vqd, now));
+    cache.retain(|_, (_, _, stored_at)| now.duration_since(*stored_at) < VQD_TTL);
+    cache.insert(query.to_owned(), (vqd, route, now));
+}
+
+fn evict_vqd(query: &str) {
+    if let Some(cache) = VQD_CACHE.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.remove(query);
+    }
 }
 
 fn build_form(query: &str, start: usize, vqd: Option<&str>) -> Vec<(&'static str, String)> {
@@ -106,24 +117,70 @@ async fn search_results_at(
     query: &str,
     start: usize,
 ) -> Result<Vec<RawResult>, EngineError> {
-    let vqd = if start > 0 {
-        let Some(vqd) = cached_vqd(query) else {
-            // DDG reads a paginated request without a `vqd` as bot traffic.
-            return Err(EngineError::Blocked {
-                kind: BlockKind::Captcha,
-                retry_after: None,
-                detail: "DuckDuckGo pagination requires a vqd token".into(),
-            });
-        };
-        Some(vqd)
-    } else {
-        None
+    let cached = (start > 0).then(|| cached_vqd(query)).flatten();
+    if start > 0 && cached.is_none() {
+        // DDG reads a paginated request without a `vqd` as bot traffic.
+        return Err(EngineError::Blocked {
+            kind: BlockKind::Captcha,
+            retry_after: None,
+            detail: "DuckDuckGo pagination requires a vqd token".into(),
+        });
+    }
+    let (vqd, pinned) = cached
+        .map(|(vqd, route)| (Some(vqd), Some(route)))
+        .unwrap_or((None, None));
+
+    if pinned.as_ref().is_some_and(|route| {
+        proxy::enabled_for("DuckDuckGo") && proxy::pinned_route(route, "DuckDuckGo").is_none()
+    }) {
+        evict_vqd(query);
+        return Err(EngineError::Blocked {
+            kind: BlockKind::Captcha,
+            retry_after: None,
+            detail: "DuckDuckGo pinned proxy is unavailable".into(),
+        });
+    }
+
+    let won = match proxy::race(
+        Plan {
+            engine: "DuckDuckGo",
+            target: base_url,
+            pinned,
+        },
+        |route| fetch_results(route, base_url, query, start, vqd.as_deref()),
+    )
+    .await
+    {
+        Ok(won) => won,
+        Err(error) => {
+            if start > 0 {
+                evict_vqd(query);
+            }
+            return Err(error);
+        }
     };
 
-    let resp = browser_client()
+    let (results, new_vqd) = won.value;
+    if start == 0
+        && let Some(vqd) = new_vqd
+    {
+        store_vqd(query, vqd, won.route);
+    }
+    Ok(results)
+}
+
+async fn fetch_results(
+    route: Route,
+    base_url: &str,
+    query: &str,
+    start: usize,
+    vqd: Option<&str>,
+) -> Result<(Vec<RawResult>, Option<String>), EngineError> {
+    let resp = route
+        .client()
         .post(base_url)
         .header(reqwest::header::REFERER, "https://html.duckduckgo.com/")
-        .form(&build_form(query, start, vqd.as_deref()))
+        .form(&build_form(query, start, vqd))
         .send()
         .await
         .map_err(EngineError::ReqwestError)?;
@@ -139,19 +196,14 @@ async fn search_results_at(
         });
     }
     if !looks_like_search_results(&html) {
-        return Err(EngineError::ParseError(
-            "DuckDuckGo response markup may have changed; results marker was missing".into(),
+        return Err(proxy::marker_error(
+            "DuckDuckGo",
+            &route.id,
+            "DuckDuckGo response markup may have changed; results marker was missing",
         ));
     }
-    if start == 0
-        && let Some(vqd) = extract_vqd(&html)
-    {
-        // This adapter has no cache dependency: a process-local token is
-        // enough while keeping `search-engines` pure and cache-free.
-        store_vqd(query, vqd);
-    }
 
-    parse_response(&html)
+    Ok((parse_response(&html)?, extract_vqd(&html)))
 }
 
 pub fn parse_response(html: &str) -> Result<Vec<RawResult>, EngineError> {
@@ -210,14 +262,21 @@ mod test {
     #[test]
     fn a_stored_vqd_is_returned_for_the_same_query() {
         let query = "vqd-cache-same-query-008";
-        store_vqd(query, "4-same-query".to_owned());
+        store_vqd(query, "4-same-query".to_owned(), RouteId::Direct);
 
-        assert_eq!(cached_vqd(query), Some("4-same-query".to_owned()));
+        assert_eq!(
+            cached_vqd(query),
+            Some(("4-same-query".to_owned(), RouteId::Direct))
+        );
     }
 
     #[test]
     fn a_vqd_for_a_different_query_is_not_returned() {
-        store_vqd("vqd-cache-source-query-008", "4-source-query".to_owned());
+        store_vqd(
+            "vqd-cache-source-query-008",
+            "4-source-query".to_owned(),
+            RouteId::Direct,
+        );
 
         assert_eq!(cached_vqd("vqd-cache-different-query-008"), None);
     }

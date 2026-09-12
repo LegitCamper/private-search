@@ -57,6 +57,14 @@ export function skeletonsNeeded(queueLength, pageSize) {
   return Math.max(0, pageSize - queueLength);
 }
 
+export function shouldFlushFirstPaint({ elapsedMs, holdMs, isComplete, bufferedCount, pageSize }) {
+  return isComplete || elapsedMs >= holdMs || bufferedCount >= pageSize;
+}
+
+export function sortBufferedByScore(entries) {
+  return entries.slice().sort((a, b) => (b.result.score ?? 0) - (a.result.score ?? 0));
+}
+
 export function canLoadNextPage({ batchLoading, polling, hasMoreResults }) {
   return !batchLoading && !polling && hasMoreResults;
 }
@@ -256,6 +264,7 @@ export class StreamStateReducer {
   constructor() {
     this.orderId = null;
     this.canonical = false; // boolean flag from meta
+    this.cached = false;
     this.canonicalOrderId = null; // ID only from done
     this.activeOrderToken = null;
     this.serverCursor = 0;
@@ -327,6 +336,9 @@ export class StreamStateReducer {
     }
     if (data.canonical !== undefined) {
       this.canonical = !!data.canonical;
+    }
+    if (data.cached !== undefined) {
+      this.cached = !!data.cached;
     }
     if (data.start !== undefined) {
       this.serverCursor = data.start;
@@ -475,6 +487,7 @@ export class StreamStateReducer {
     return {
       orderId: this.orderId,
       canonical: this.canonical,
+      cached: this.cached,
       canonicalOrderId: this.canonicalOrderId,
       activeOrderToken: this.activeOrderToken,
       serverCursor: this.serverCursor,

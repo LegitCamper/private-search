@@ -1,6 +1,7 @@
 use crate::{
     EngineError, EngineInfo, ImageEngine, RawImage, RawResult, SearchEngine, body_or_block,
-    browser_client, parse_images, parse_search,
+    parse_images, parse_search,
+    proxy::{self, Plan, Route},
 };
 use async_trait::async_trait;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -54,21 +55,36 @@ impl SearchEngine for Brave {
         start: usize,
         _count: usize,
     ) -> Result<Vec<RawResult>, EngineError> {
-        let resp = browser_client()
-            .get(build_search_url(query, start))
-            .send()
-            .await
-            .map_err(EngineError::ReqwestError)?;
-
-        let html = body_or_block(resp, "Brave").await?;
-        if !looks_like_search_results(&html) {
-            return Err(EngineError::ParseError(
-                "Brave response markup may have changed; results marker was missing".into(),
-            ));
-        }
-
-        parse_search_response(&html)
+        let url = build_search_url(query, start);
+        proxy::race(
+            Plan {
+                engine: "Brave",
+                target: &url,
+                pinned: None,
+            },
+            |route| fetch_search(route, url.clone()),
+        )
+        .await
+        .map(|won| won.value)
     }
+}
+
+async fn fetch_search(route: Route, url: String) -> Result<Vec<RawResult>, EngineError> {
+    let resp = route
+        .client()
+        .get(url)
+        .send()
+        .await
+        .map_err(EngineError::ReqwestError)?;
+    let html = body_or_block(resp, "Brave").await?;
+    if !looks_like_search_results(&html) {
+        return Err(proxy::marker_error(
+            "Brave",
+            &route.id,
+            "Brave response markup may have changed; results marker was missing",
+        ));
+    }
+    parse_search_response(&html)
 }
 
 pub fn parse_search_response(html: &str) -> Result<Vec<RawResult>, EngineError> {
@@ -96,21 +112,38 @@ impl ImageEngine for Brave {
         _start: usize,
         _count: usize,
     ) -> Result<Vec<RawImage>, EngineError> {
-        let resp = browser_client()
-            .get(build_image_search_url(query))
-            .send()
-            .await
-            .map_err(EngineError::ReqwestError)?;
-
-        let html = body_or_block(resp, "Brave").await?;
-        if !looks_like_image_results(&html) {
-            return Err(EngineError::ParseError(
-                "Brave image response markup may have changed; results marker was missing".into(),
-            ));
-        }
-
-        parse_image_response(&html)
+        let url = build_image_search_url(query);
+        proxy::race(
+            Plan {
+                engine: "Brave",
+                target: &url,
+                pinned: None,
+            },
+            |route| fetch_images(route, url.clone()),
+        )
+        .await
+        .map(|won| won.value)
     }
+}
+
+async fn fetch_images(route: Route, url: String) -> Result<Vec<RawImage>, EngineError> {
+    let resp = route
+        .client()
+        .get(url)
+        .send()
+        .await
+        .map_err(EngineError::ReqwestError)?;
+
+    let html = body_or_block(resp, "Brave").await?;
+    if !looks_like_image_results(&html) {
+        return Err(proxy::marker_error(
+            "Brave",
+            &route.id,
+            "Brave image response markup may have changed; results marker was missing",
+        ));
+    }
+
+    parse_image_response(&html)
 }
 
 pub fn parse_image_response(html: &str) -> Result<Vec<RawImage>, EngineError> {
