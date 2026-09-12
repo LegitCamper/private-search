@@ -577,7 +577,10 @@ impl Ranker<CachedImage> for UrlSortRanker {
 /// Was one hand-written source struct per engine; with twenty-odd adapters
 /// that became twenty identical copies of the same six-line mapping, so the
 /// conversion lives here once instead.
-struct TextSource<E>(E);
+struct TextSource<E> {
+    engine: E,
+    routed_query: Option<String>,
+}
 
 #[async_trait]
 impl<E> EngineSource<CachedResult> for TextSource<E>
@@ -585,12 +588,16 @@ where
     E: SearchEngine + Sync + 'static,
 {
     fn name(&self) -> &'static str {
-        self.0.name()
+        self.engine.name()
     }
 
     async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<CachedResult>, String> {
-        self.0
-            .search_results(query, start, ENGINE_PAGE_HINT)
+        self.engine
+            .search_results(
+                self.routed_query.as_deref().unwrap_or(query),
+                start,
+                ENGINE_PAGE_HINT,
+            )
             .await
             .map(|rows| {
                 rows.into_iter()
@@ -689,6 +696,122 @@ fn looks_like_stackexchange_query(query: &str) -> bool {
         })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryIntent {
+    General,
+    GitForge,
+    Wiki,
+    Package(SearchEngines),
+}
+
+fn query_tokens(query: &str) -> impl Iterator<Item = String> + '_ {
+    query.split_whitespace().map(|token| {
+        token
+            .trim_matches(|character: char| !character.is_alphanumeric() && character != '.')
+            .to_lowercase()
+    })
+}
+
+fn query_intent(query: &str) -> QueryIntent {
+    let lower = query.to_lowercase();
+    let tokens: Vec<_> = query_tokens(query).collect();
+
+    if lower.contains("github.com")
+        || ["github", "gh", "repo", "repository", "gitlab", "codeberg"]
+            .iter()
+            .any(|hint| tokens.iter().any(|token| token == hint))
+    {
+        return QueryIntent::GitForge;
+    }
+    if ["wiki", "wikipedia", "encyclopedia"]
+        .iter()
+        .any(|hint| tokens.iter().any(|token| token == hint))
+    {
+        return QueryIntent::Wiki;
+    }
+
+    let package_hints: &[(&[&str], SearchEngines)] = &[
+        (&["npm", "node", "javascript"], SearchEngines::Npm),
+        (
+            &["cargo", "crate", "crates", "rust"],
+            SearchEngines::CratesIo,
+        ),
+        (&["pypi", "pip", "python"], SearchEngines::PyPi),
+        (&["rubygems", "gem", "ruby"], SearchEngines::RubyGems),
+        (&["packagist", "composer", "php"], SearchEngines::Packagist),
+        (&["maven", "gradle", "java"], SearchEngines::MavenCentral),
+        (&["nuget", ".net", "dotnet", "csharp"], SearchEngines::NuGet),
+        (&["hex", "elixir", "erlang"], SearchEngines::HexPm),
+        (&["docker", "container"], SearchEngines::DockerHub),
+        (&["golang", "go"], SearchEngines::GoPkg),
+    ];
+    package_hints
+        .iter()
+        .find(|(hints, _)| {
+            hints
+                .iter()
+                .any(|hint| tokens.iter().any(|token| token == hint))
+        })
+        .map_or(QueryIntent::General, |(_, engine)| {
+            QueryIntent::Package(*engine)
+        })
+}
+
+fn is_routing_token(token: &str, intent: QueryIntent) -> bool {
+    let hints: &[&str] = match intent {
+        QueryIntent::GitForge => &[
+            "github",
+            "github.com",
+            "gh",
+            "repo",
+            "repository",
+            "gitlab",
+            "codeberg",
+        ],
+        QueryIntent::Wiki => &["wiki", "wikipedia", "encyclopedia"],
+        QueryIntent::Package(SearchEngines::Npm) => &["npm", "node", "javascript"],
+        QueryIntent::Package(SearchEngines::CratesIo) => &["cargo", "crate", "crates", "rust"],
+        QueryIntent::Package(SearchEngines::PyPi) => &["pypi", "pip", "python"],
+        QueryIntent::Package(SearchEngines::RubyGems) => &["rubygems", "gem", "ruby"],
+        QueryIntent::Package(SearchEngines::Packagist) => &["packagist", "composer", "php"],
+        QueryIntent::Package(SearchEngines::MavenCentral) => &["maven", "gradle", "java"],
+        QueryIntent::Package(SearchEngines::NuGet) => &["nuget", ".net", "dotnet", "csharp"],
+        QueryIntent::Package(SearchEngines::HexPm) => &["hex", "elixir", "erlang"],
+        QueryIntent::Package(SearchEngines::DockerHub) => &["docker", "container"],
+        QueryIntent::Package(SearchEngines::GoPkg) => &["golang", "go"],
+        QueryIntent::General | QueryIntent::Package(_) => &[],
+    };
+    hints.contains(&token)
+}
+
+fn routed_query(query: &str, engine: SearchEngines) -> Option<String> {
+    let intent = query_intent(query);
+    let targeted = match intent {
+        QueryIntent::GitForge => matches!(
+            engine,
+            SearchEngines::GitHub | SearchEngines::GitLab | SearchEngines::Codeberg
+        ),
+        QueryIntent::Wiki => matches!(engine, SearchEngines::Wikipedia | SearchEngines::ArchWiki),
+        QueryIntent::Package(target) => engine == target,
+        QueryIntent::General => false,
+    };
+    if !targeted {
+        return None;
+    }
+
+    let cleaned = query
+        .split_whitespace()
+        .filter(|token| {
+            let normalized = token
+                .trim_matches(|character: char| !character.is_alphanumeric() && character != '.')
+                .to_lowercase();
+            !is_routing_token(&normalized, intent)
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!cleaned.is_empty() && cleaned != query).then_some(cleaned)
+}
+
 impl SearchEngines {
     /// Every known text-search engine, including quota-sensitive sources.
     pub fn all() -> Vec<Self> {
@@ -718,15 +841,34 @@ impl SearchEngines {
         ]
     }
 
-    /// Engines used when callers do not choose a set explicitly. GitHub and
-    /// the package registries stay enabled for broad queries (so `pangolin`
-    /// can find its repository), while Stack Exchange's unusually small
-    /// unauthenticated daily quota is reserved for question/error-shaped
-    /// searches where it is most likely to add value.
+    /// Engines used when callers do not choose a set explicitly. Explicit
+    /// site/package hints narrow the fanout; unknown queries keep broad web,
+    /// wiki, forge, and documentation coverage without querying every registry.
     pub fn defaults_for_query(query: &str) -> Vec<Self> {
-        let mut engines = Self::all();
-        if !looks_like_stackexchange_query(query) {
-            engines.retain(|engine| *engine != Self::StackExchange);
+        let mut engines = match query_intent(query) {
+            QueryIntent::GitForge => vec![
+                Self::Brave,
+                Self::DuckDuckGo,
+                Self::GitHub,
+                Self::GitLab,
+                Self::Codeberg,
+            ],
+            QueryIntent::Wiki => vec![Self::Brave, Self::DuckDuckGo, Self::Wikipedia],
+            QueryIntent::Package(package) => {
+                vec![Self::Brave, Self::DuckDuckGo, Self::GitHub, package]
+            }
+            QueryIntent::General => vec![
+                Self::Brave,
+                Self::DuckDuckGo,
+                Self::GitHub,
+                Self::Wikipedia,
+                Self::Mdn,
+                Self::ArchWiki,
+            ],
+        };
+
+        if looks_like_stackexchange_query(query) {
+            engines.push(Self::StackExchange);
         }
         engines
     }
@@ -758,30 +900,39 @@ impl SearchEngines {
         }
     }
 
-    fn source(self) -> Arc<dyn EngineSource<CachedResult>> {
+    fn source(self, query: &str) -> Arc<dyn EngineSource<CachedResult>> {
+        let routed_query = routed_query(query, self);
+        macro_rules! source {
+            ($engine:expr) => {
+                Arc::new(TextSource {
+                    engine: $engine,
+                    routed_query,
+                })
+            };
+        }
         match self {
-            Self::Brave => Arc::new(TextSource(Brave)),
-            Self::DuckDuckGo => Arc::new(TextSource(DuckDuckGo)),
-            Self::GitHub => Arc::new(TextSource(GitHub)),
-            Self::GitLab => Arc::new(TextSource(GitLab)),
-            Self::Codeberg => Arc::new(TextSource(Codeberg)),
-            Self::StackExchange => Arc::new(TextSource(StackExchange)),
-            Self::HackerNews => Arc::new(TextSource(HackerNews)),
-            Self::Lobsters => Arc::new(TextSource(Lobsters)),
-            Self::Wikipedia => Arc::new(TextSource(Wikipedia)),
-            Self::ArchWiki => Arc::new(TextSource(ArchWiki)),
-            Self::Mdn => Arc::new(TextSource(Mdn)),
-            Self::CratesIo => Arc::new(TextSource(CratesIo)),
-            Self::Npm => Arc::new(TextSource(Npm)),
-            Self::PyPi => Arc::new(TextSource(PyPi)),
-            Self::RubyGems => Arc::new(TextSource(RubyGems)),
-            Self::Packagist => Arc::new(TextSource(Packagist)),
-            Self::MavenCentral => Arc::new(TextSource(MavenCentral)),
-            Self::NuGet => Arc::new(TextSource(NuGet)),
-            Self::HexPm => Arc::new(TextSource(HexPm)),
-            Self::DockerHub => Arc::new(TextSource(DockerHub)),
-            Self::NixPackages => Arc::new(TextSource(NixPackages)),
-            Self::GoPkg => Arc::new(TextSource(GoPkg)),
+            Self::Brave => source!(Brave),
+            Self::DuckDuckGo => source!(DuckDuckGo),
+            Self::GitHub => source!(GitHub),
+            Self::GitLab => source!(GitLab),
+            Self::Codeberg => source!(Codeberg),
+            Self::StackExchange => source!(StackExchange),
+            Self::HackerNews => source!(HackerNews),
+            Self::Lobsters => source!(Lobsters),
+            Self::Wikipedia => source!(Wikipedia),
+            Self::ArchWiki => source!(ArchWiki),
+            Self::Mdn => source!(Mdn),
+            Self::CratesIo => source!(CratesIo),
+            Self::Npm => source!(Npm),
+            Self::PyPi => source!(PyPi),
+            Self::RubyGems => source!(RubyGems),
+            Self::Packagist => source!(Packagist),
+            Self::MavenCentral => source!(MavenCentral),
+            Self::NuGet => source!(NuGet),
+            Self::HexPm => source!(HexPm),
+            Self::DockerHub => source!(DockerHub),
+            Self::NixPackages => source!(NixPackages),
+            Self::GoPkg => source!(GoPkg),
         }
     }
 }
@@ -1249,7 +1400,7 @@ impl SearchBuilder {
         // down an engine instead of just erroring out, so this call is never
         // skipped even when every engine is currently cooling.
         let sources: Vec<Arc<dyn EngineSource<CachedResult>>> =
-            usable.iter().map(|e| e.source()).collect();
+            usable.iter().map(|e| e.source(&self.query)).collect();
 
         let extend = text_cache()
             .await
@@ -1309,7 +1460,7 @@ impl SearchBuilder {
 
         let (usable, cooling) = partition_by_cooldown(&engines, SearchEngines::name);
         let sources: Vec<Arc<dyn EngineSource<CachedResult>>> =
-            usable.iter().map(|e| e.source()).collect();
+            usable.iter().map(|e| e.source(&self.query)).collect();
         let cooling_reports = cooling_reports(&cooling, SearchEngines::name);
 
         let subscription = text_cache()
@@ -1563,10 +1714,63 @@ mod test {
     }
 
     #[test]
-    fn broad_defaults_keep_github_but_reserve_stackexchange_quota() {
-        let engines = SearchEngines::defaults_for_query("pangolin");
+    fn github_hint_narrows_defaults_to_forges_and_web() {
+        let engines = SearchEngines::defaults_for_query("ripgrep github");
+
+        assert_eq!(
+            engines,
+            vec![
+                SearchEngines::Brave,
+                SearchEngines::DuckDuckGo,
+                SearchEngines::GitHub,
+                SearchEngines::GitLab,
+                SearchEngines::Codeberg,
+            ]
+        );
+    }
+
+    #[test]
+    fn wiki_hint_excludes_package_registries() {
+        let engines = SearchEngines::defaults_for_query("quantum computing wikipedia");
+
+        assert!(engines.contains(&SearchEngines::Wikipedia));
+        assert!(!engines.contains(&SearchEngines::Npm));
+        assert!(!engines.contains(&SearchEngines::CratesIo));
+    }
+
+    #[test]
+    fn package_hint_selects_only_matching_registry() {
+        let engines = SearchEngines::defaults_for_query("express npm");
+
+        assert_eq!(
+            engines,
+            vec![
+                SearchEngines::Brave,
+                SearchEngines::DuckDuckGo,
+                SearchEngines::GitHub,
+                SearchEngines::Npm,
+            ]
+        );
+    }
+
+    #[test]
+    fn routed_query_removes_intent_hint_for_target_engine() {
+        assert_eq!(
+            routed_query("ripgrep github", SearchEngines::GitHub),
+            Some("ripgrep".to_string())
+        );
+        assert_eq!(routed_query("ripgrep github", SearchEngines::Brave), None);
+    }
+
+    #[test]
+    fn general_defaults_keep_web_and_high_signal_sources_without_package_flood() {
+        let engines = SearchEngines::defaults_for_query("cats");
+
+        assert!(engines.contains(&SearchEngines::Brave));
+        assert!(engines.contains(&SearchEngines::Wikipedia));
         assert!(engines.contains(&SearchEngines::GitHub));
-        assert!(!engines.contains(&SearchEngines::StackExchange));
+        assert!(!engines.contains(&SearchEngines::Npm));
+        assert!(engines.len() < SearchEngines::all().len());
     }
 
     #[test]
