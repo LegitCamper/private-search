@@ -12,6 +12,7 @@ use reqwest::{
         ACCEPT, ACCEPT_LANGUAGE, CONNECTION, DNT, HeaderMap, HeaderName, HeaderValue,
         UPGRADE_INSECURE_REQUESTS,
     },
+    redirect::{Attempt, Policy},
 };
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,7 @@ use std::time::Duration;
 
 mod brave;
 mod duckduckgo;
+pub mod proxy;
 pub mod sites;
 
 pub use brave::Brave;
@@ -138,46 +140,61 @@ pub trait ImageEngine: EngineInfo + Clone + Send {
 /// Chrome's client-hint headers, which this client cannot plausibly emulate.
 static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
 
+fn browser_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+    );
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.5"));
+    headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
+    headers.insert(UPGRADE_INSECURE_REQUESTS, HeaderValue::from_static("1"));
+    headers.insert(DNT, HeaderValue::from_static("1"));
+    headers.insert(
+        HeaderName::from_static("sec-fetch-dest"),
+        HeaderValue::from_static("document"),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-fetch-mode"),
+        HeaderValue::from_static("navigate"),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-fetch-site"),
+        HeaderValue::from_static("none"),
+    );
+    headers.insert(
+        HeaderName::from_static("sec-fetch-user"),
+        HeaderValue::from_static("?1"),
+    );
+    headers
+}
+
+pub(crate) fn base_builder() -> reqwest::ClientBuilder {
+    Client::builder()
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0")
+        .default_headers(browser_headers())
+        .gzip(true)
+        .brotli(true)
+}
+
+pub(crate) fn https_only_builder() -> reqwest::ClientBuilder {
+    base_builder().redirect(Policy::custom(|attempt: Attempt<'_>| {
+        if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else if attempt.url().scheme() != "https" {
+            attempt.error("refusing redirect to non-HTTPS URL")
+        } else {
+            attempt.follow()
+        }
+    }))
+}
+
 /// Builds one reusable browser-like client so its identity stays stable for
 /// token-based flows while requests benefit from connection pooling.
 fn browser_client() -> Client {
     CLIENT
         .get_or_init(|| {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                ACCEPT,
-                HeaderValue::from_static(
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                ),
-            );
-            headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.5"));
-            headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
-            headers.insert(UPGRADE_INSECURE_REQUESTS, HeaderValue::from_static("1"));
-            headers.insert(DNT, HeaderValue::from_static("1"));
-            headers.insert(
-                HeaderName::from_static("sec-fetch-dest"),
-                HeaderValue::from_static("document"),
-            );
-            headers.insert(
-                HeaderName::from_static("sec-fetch-mode"),
-                HeaderValue::from_static("navigate"),
-            );
-            headers.insert(
-                HeaderName::from_static("sec-fetch-site"),
-                HeaderValue::from_static("none"),
-            );
-            headers.insert(
-                HeaderName::from_static("sec-fetch-user"),
-                HeaderValue::from_static("?1"),
-            );
-
-            Client::builder()
-                .user_agent(
-                    "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0",
-                )
-                .default_headers(headers)
-                .gzip(true)
-                .brotli(true)
+            base_builder()
                 .build()
                 .expect("failed to build browser client")
         })

@@ -160,6 +160,20 @@ pub async fn clean_cache(max_age: Duration) -> Result<u64, FetchError> {
     Ok(search_cache::clean_cache(pool, max_age).await?)
 }
 
+pub use search_engines::proxy::{ProxyStats, stats as proxy_stats};
+
+pub fn proxy_health_enabled() -> bool {
+    search_engines::proxy::enabled()
+        || matches!(
+            std::env::var("ENGINE_PROXY_HEALTH_ENABLED").as_deref(),
+            Ok("1")
+        )
+}
+
+pub async fn refresh_proxies() -> Result<ProxyStats, String> {
+    search_engines::proxy::refresh_once().await
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedResult {
     url: String,

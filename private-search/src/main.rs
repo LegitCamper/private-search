@@ -67,16 +67,23 @@ fn build_rocket() -> Rocket<Build> {
 
     let cache_clean_interval = resolve_secs("CACHE_CLEAN_INTERVAL_SECS", 60 * 60); // hourly
     let cache_max_age = resolve_secs("CACHE_MAX_AGE_SECS", 24 * 60 * 60); // 1 day
+    let proxy_refresh_interval = resolve_secs("ENGINE_PROXY_REFRESH_SECS", 15 * 60);
 
     let figment = rocket::Config::figment().merge(("template_dir", template_dir));
 
-    rocket::custom(figment)
+    let mut rocket = rocket::custom(figment)
         .attach(Template::fairing())
         .attach(CacheFairing)
         .attach(CacheCleanupFairing {
             interval: cache_clean_interval,
             max_age: cache_max_age,
-        })
+        });
+    if private_search_engines::proxy_health_enabled() {
+        rocket = rocket.attach(ProxyHealthFairing {
+            interval: proxy_refresh_interval,
+        });
+    }
+    rocket
         .manage(RateLimiter::default())
         .mount("/static", FileServer::from(static_dir))
         .mount(
@@ -133,6 +140,39 @@ impl Fairing for CacheCleanupFairing {
                     }
                     Ok(_) => {}
                     Err(e) => log::error!("cache cleanup failed: {e}"),
+                }
+            }
+        });
+    }
+}
+
+struct ProxyHealthFairing {
+    interval: Duration,
+}
+
+#[rocket::async_trait]
+impl Fairing for ProxyHealthFairing {
+    fn info(&self) -> Info {
+        Info {
+            name: "Proxy health scheduler",
+            kind: Kind::Liftoff,
+        }
+    }
+
+    async fn on_liftoff(&self, _rocket: &Rocket<Orbit>) {
+        let interval = self.interval;
+        rocket::tokio::spawn(async move {
+            let mut ticker = rocket::tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                match private_search_engines::refresh_proxies().await {
+                    Ok(stats) => log::info!(
+                        "proxy health: {} healthy, fastest {:?}ms, slowest {:?}ms",
+                        stats.healthy,
+                        stats.fastest_ms,
+                        stats.slowest_ms
+                    ),
+                    Err(error) => log::error!("proxy health refresh failed: {error}"),
                 }
             }
         });
