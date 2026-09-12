@@ -192,6 +192,7 @@ pub struct SearchResult {
     pub description: String,
     pub engines: Vec<String>,
     pub cached: bool,
+    pub score: u32,
 }
 
 impl PartialEq for SearchResult {
@@ -938,8 +939,9 @@ fn cooling_reports<E: Copy>(
 /// function doesn't have); Results entries are converted from the merge
 /// cache's row type via `convert`.
 fn map_cache_event<R: CacheableRow, T>(
+    query: &str,
     event: CacheEvent<R>,
-    convert: fn(MergedRowResult<R>) -> T,
+    convert: fn(&str, MergedRowResult<R>) -> T,
 ) -> StreamEvent<T> {
     match event {
         CacheEvent::Metadata {
@@ -956,7 +958,7 @@ fn map_cache_event<R: CacheableRow, T>(
                 .into_iter()
                 .map(|pr| PositionedResult {
                     position: pr.position,
-                    result: convert(pr.row),
+                    result: convert(query, pr.row),
                 })
                 .collect(),
         }),
@@ -1038,8 +1040,9 @@ impl StreamAccumulator {
 fn map_and_observe<R: CacheableRow, T>(
     acc: &mut StreamAccumulator,
     usable_is_empty: bool,
+    query: &str,
     event: CacheEvent<R>,
-    convert: fn(MergedRowResult<R>) -> T,
+    convert: fn(&str, MergedRowResult<R>) -> T,
 ) -> (StreamEvent<T>, bool) {
     acc.observe(&event);
     let is_done = matches!(event, CacheEvent::Done { .. });
@@ -1047,10 +1050,10 @@ fn map_and_observe<R: CacheableRow, T>(
     let mapped = if is_done {
         match acc.terminal_error_message(usable_is_empty) {
             Some(message) => StreamEvent::Error(StreamErrorPayload { message }),
-            None => map_cache_event(event, convert),
+            None => map_cache_event(query, event, convert),
         }
     } else {
-        map_cache_event(event, convert)
+        map_cache_event(query, event, convert)
     };
     (mapped, is_terminal)
 }
@@ -1066,10 +1069,11 @@ fn map_and_observe<R: CacheableRow, T>(
 /// outbound receiver is dropped, so the owner's outcomes are still recorded
 /// even if the HTTP-side subscriber disconnects first.
 fn build_stream<R, T, F>(
+    query: String,
     subscription: CacheSubscription<R>,
     cooling_reports: Vec<EngineReport>,
     usable_is_empty: bool,
-    convert: fn(MergedRowResult<R>) -> T,
+    convert: fn(&str, MergedRowResult<R>) -> T,
     record: F,
 ) -> SearchStream<T>
 where
@@ -1096,7 +1100,8 @@ where
 
     for seq_event in snapshot {
         let SequencedCacheEvent { sequence, event } = seq_event;
-        let (mapped, is_terminal) = map_and_observe(&mut acc, usable_is_empty, event, convert);
+        let (mapped, is_terminal) =
+            map_and_observe(&mut acc, usable_is_empty, &query, event, convert);
         out_snapshot.push(SequencedStreamEvent {
             sequence: Some(sequence),
             event: mapped,
@@ -1128,7 +1133,8 @@ where
         let mut acc = acc;
         while let Some(seq_event) = live.recv().await {
             let SequencedCacheEvent { sequence, event } = seq_event;
-            let (mapped, is_terminal) = map_and_observe(&mut acc, usable_is_empty, event, convert);
+            let (mapped, is_terminal) =
+                map_and_observe(&mut acc, usable_is_empty, &query, event, convert);
             // Ignore send errors: keep draining so the owner's outcomes are
             // still recorded exactly once even if the downstream (HTTP)
             // receiver disconnected mid-stream.
@@ -1278,13 +1284,7 @@ impl SearchBuilder {
         let results = extend
             .rows
             .into_iter()
-            .map(|r| SearchResult {
-                url: r.value.url,
-                title: r.value.title,
-                description: r.value.description,
-                engines: r.engines,
-                cached: r.cached,
-            })
+            .map(|r| to_search_result(&self.query, r))
             .collect();
 
         Ok(SearchResponse {
@@ -1332,6 +1332,7 @@ impl SearchBuilder {
         };
 
         Ok(build_stream(
+            self.query,
             subscription,
             cooling_reports,
             usable_is_empty,
@@ -1341,17 +1342,20 @@ impl SearchBuilder {
     }
 }
 
-fn to_search_result(row: MergedRowResult<CachedResult>) -> SearchResult {
+fn to_search_result(query: &str, row: MergedRowResult<CachedResult>) -> SearchResult {
+    let words = query_words(query);
+    let score = cached_result_score(&row.value, query, &words);
     SearchResult {
         url: row.value.url,
         title: row.value.title,
         description: row.value.description,
         engines: row.engines,
         cached: row.cached,
+        score,
     }
 }
 
-fn to_image_result(row: MergedRowResult<CachedImage>) -> ImageResult {
+fn to_image_result(_query: &str, row: MergedRowResult<CachedImage>) -> ImageResult {
     ImageResult {
         url: row.value.url,
         title: row.value.title,
@@ -1532,6 +1536,7 @@ impl ImageSearchBuilder {
         };
 
         Ok(build_stream(
+            self.query,
             subscription,
             cooling_reports,
             usable_is_empty,
@@ -1779,6 +1784,7 @@ mod test {
             description: "مرحبا بالعالم (RTL text) 🎉".to_string(),
             engines: vec!["Brave".to_string()],
             cached: false,
+            score: 0,
         };
 
         let json = serde_json::to_string(&result).unwrap();
@@ -1877,7 +1883,7 @@ mod test {
             order_kind: OrderKind::Canonical,
             cached: true,
         };
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Meta(meta) => {
                 assert_eq!(meta.order_id, 42);
                 assert!(meta.canonical);
@@ -1891,7 +1897,7 @@ mod test {
             order_kind: OrderKind::Arrival,
             cached: false,
         };
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Meta(meta) => assert!(!meta.canonical),
             other => panic!("expected Meta, got {other:?}"),
         }
@@ -1904,7 +1910,7 @@ mod test {
             positioned(7, "https://b.example"),
         ]);
 
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Results(results) => {
                 assert_eq!(results.entries.len(), 2);
                 assert_eq!(results.entries[0].position, 3);
@@ -1923,7 +1929,7 @@ mod test {
             url: "https://a.example".into(),
             engines: vec!["Brave".into(), "DuckDuckGo".into()],
         };
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Attribution(a) => {
                 assert_eq!(a.position, 2);
                 assert_eq!(a.url, "https://a.example");
@@ -1939,7 +1945,7 @@ mod test {
             engine: "Brave".into(),
             outcome: EngineOutcome::TimedOut,
         };
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Engine(report) => {
                 assert_eq!(report.engine, "Brave");
                 assert!(matches!(report.status, EngineStatus::TimedOut));
@@ -1956,7 +1962,7 @@ mod test {
             next_cursor: 20,
             has_more: true,
         };
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Done(done) => {
                 assert_eq!(done.active_order_id, 5);
                 assert_eq!(done.canonical_order_id, Some(9));
@@ -1970,7 +1976,7 @@ mod test {
     #[test]
     fn map_cache_event_maps_error() {
         let event: CacheEvent<CachedResult> = CacheEvent::Error("db exploded".into());
-        match map_cache_event(event, to_search_result) {
+        match map_cache_event("test", event, to_search_result) {
             StreamEvent::Error(e) => assert_eq!(e.message, "db exploded"),
             other => panic!("expected Error, got {other:?}"),
         }
@@ -1980,7 +1986,7 @@ mod test {
     fn map_and_observe_substitutes_error_when_no_usable_engines_and_no_results() {
         let mut acc = StreamAccumulator::default();
         let (mapped, is_terminal) =
-            map_and_observe(&mut acc, true, done_event(0), to_search_result);
+            map_and_observe(&mut acc, true, "test", done_event(0), to_search_result);
         assert!(is_terminal);
         match mapped {
             StreamEvent::Error(e) => {
@@ -1997,10 +2003,10 @@ mod test {
             engine: "Brave".into(),
             outcome: EngineOutcome::Failed("boom".into()),
         };
-        map_and_observe(&mut acc, false, engine_event, to_search_result);
+        map_and_observe(&mut acc, false, "test", engine_event, to_search_result);
 
         let (mapped, is_terminal) =
-            map_and_observe(&mut acc, false, done_event(0), to_search_result);
+            map_and_observe(&mut acc, false, "test", done_event(0), to_search_result);
         assert!(is_terminal);
         match mapped {
             StreamEvent::Error(e) => {
@@ -2015,10 +2021,10 @@ mod test {
         let mut acc = StreamAccumulator::default();
         let results: CacheEvent<CachedResult> =
             CacheEvent::Results(vec![positioned(0, "https://a.example")]);
-        map_and_observe(&mut acc, false, results, to_search_result);
+        map_and_observe(&mut acc, false, "test", results, to_search_result);
 
         let (mapped, is_terminal) =
-            map_and_observe(&mut acc, false, done_event(1), to_search_result);
+            map_and_observe(&mut acc, false, "test", done_event(1), to_search_result);
         assert!(is_terminal);
         assert!(matches!(mapped, StreamEvent::Done(_)));
     }
@@ -2027,7 +2033,8 @@ mod test {
     fn map_and_observe_marks_error_event_as_terminal_without_substitution() {
         let mut acc = StreamAccumulator::default();
         let event: CacheEvent<CachedResult> = CacheEvent::Error("db exploded".into());
-        let (mapped, is_terminal) = map_and_observe(&mut acc, false, event, to_search_result);
+        let (mapped, is_terminal) =
+            map_and_observe(&mut acc, false, "test", event, to_search_result);
         assert!(is_terminal);
         match mapped {
             StreamEvent::Error(e) => assert_eq!(e.message, "db exploded"),
@@ -2046,7 +2053,14 @@ mod test {
             engine: "DuckDuckGo".into(),
             status: EngineStatus::CoolingDown("retry in 30s".into()),
         }];
-        let mut stream = build_stream(subscription, cooling, false, to_search_result, |_| {});
+        let mut stream = build_stream(
+            "test".into(),
+            subscription,
+            cooling,
+            false,
+            to_search_result,
+            |_| {},
+        );
 
         assert_eq!(stream.snapshot.len(), 1);
         assert_eq!(stream.snapshot[0].sequence, None);
@@ -2087,9 +2101,16 @@ mod test {
 
         let record_calls = Arc::new(StdMutex::new(0));
         let record_calls_clone = record_calls.clone();
-        let mut stream = build_stream(subscription, vec![], false, to_search_result, move |_| {
-            *record_calls_clone.lock().unwrap() += 1;
-        });
+        let mut stream = build_stream(
+            "test".into(),
+            subscription,
+            vec![],
+            false,
+            to_search_result,
+            move |_| {
+                *record_calls_clone.lock().unwrap() += 1;
+            },
+        );
 
         // Snapshot processing is synchronous: by the time `build_stream`
         // returns, every event -- including the terminal `Done` -- is
@@ -2118,9 +2139,16 @@ mod test {
 
         let record_calls = Arc::new(StdMutex::new(0));
         let record_calls_clone = record_calls.clone();
-        build_stream(subscription, vec![], true, to_search_result, move |_| {
-            *record_calls_clone.lock().unwrap() += 1;
-        });
+        build_stream(
+            "test".into(),
+            subscription,
+            vec![],
+            true,
+            to_search_result,
+            move |_| {
+                *record_calls_clone.lock().unwrap() += 1;
+            },
+        );
 
         assert_eq!(*record_calls.lock().unwrap(), 0);
     }
@@ -2143,9 +2171,16 @@ mod test {
 
         let record_calls = Arc::new(StdMutex::new(0));
         let record_calls_clone = record_calls.clone();
-        let mut stream = build_stream(subscription, vec![], false, to_search_result, move |_| {
-            *record_calls_clone.lock().unwrap() += 1;
-        });
+        let mut stream = build_stream(
+            "test".into(),
+            subscription,
+            vec![],
+            false,
+            to_search_result,
+            move |_| {
+                *record_calls_clone.lock().unwrap() += 1;
+            },
+        );
 
         assert!(stream.snapshot.is_empty());
 
@@ -2196,11 +2231,18 @@ mod test {
 
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let done_tx = StdMutex::new(Some(done_tx));
-        let stream = build_stream(subscription, vec![], false, to_search_result, move |_| {
-            if let Some(done_tx) = done_tx.lock().unwrap().take() {
-                let _ = done_tx.send(());
-            }
-        });
+        let stream = build_stream(
+            "test".into(),
+            subscription,
+            vec![],
+            false,
+            to_search_result,
+            move |_| {
+                if let Some(done_tx) = done_tx.lock().unwrap().take() {
+                    let _ = done_tx.send(());
+                }
+            },
+        );
 
         // Simulate an HTTP subscriber disconnecting mid-stream: the owner
         // task must keep draining `live` and still record outcomes exactly

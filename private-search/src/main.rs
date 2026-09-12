@@ -740,6 +740,7 @@ mod test {
             description: "a description".to_string(),
             engines: vec!["duckduckgo".to_string()],
             cached: false,
+            score: 0,
         }
     }
 
