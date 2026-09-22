@@ -3,17 +3,30 @@
 <div class="search-container">
   <div class="homepage-wrapper">
     <h1 class="homepage-title">Private Search</h1>
-    <br>
 
     <form action="/search" method="get">
-      <input type="hidden" name="t" value="general">
       <input type="text" class="search-input" placeholder="Search for..." name="q" autocomplete="off" autofocus>
+      <fieldset class="homepage-categories">
+        <legend>Search category</legend>
+
+        <input class="category-radio" type="radio" id="category-general" name="t" value="general" checked>
+        <label class="category" for="category-general">General</label>
+
+        <input class="category-radio" type="radio" id="category-tech" name="t" value="tech">
+        <label class="category" for="category-tech">Tech</label>
+
+        <input class="category-radio" type="radio" id="category-programming" name="t" value="programming">
+        <label class="category" for="category-programming">Programming</label>
+
+        <input class="category-radio" type="radio" id="category-images" name="t" value="images">
+        <label class="category" for="category-images">Images</label>
+      </fieldset>
     </form>
   </div>
 </div>
 
 <footer class="homepage-footer">
-  Built by <span>LegitCamper</span> — 
+  Built by <span>LegitCamper</span> —
   <a href="https://github.com/LegitCamper/private-search" target="_blank">
     View on GitHub
   </a>

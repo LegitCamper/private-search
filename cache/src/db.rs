@@ -761,6 +761,96 @@ pub(crate) async fn commit_engine_round<R: Serialize>(
     })
 }
 
+/// One deduplicated row of a buffered first window, with every engine that
+/// contributed it. Unlike [`FreshRow`], a first-window row can have several
+/// contributing engines already at insert time, because the whole window is
+/// merged before anything is persisted.
+pub(crate) struct FirstWindowRow<R> {
+    pub url: String,
+    pub value: R,
+    pub engines: Vec<&'static str>,
+}
+
+/// Everything a released first window needs persisted at once.
+pub(crate) struct FirstWindowCommit<R> {
+    pub query_id: i64,
+    pub order_id: i64,
+    pub start_position: i64,
+    pub fetched_at: chrono::NaiveDateTime,
+    /// `(engine, next_start, exhausted)` for every engine that settled
+    /// successfully inside the window.
+    pub progress: Vec<(&'static str, i64, bool)>,
+    /// Already ranked across all contributing engines, in final order.
+    pub ranked: Vec<FirstWindowRow<R>>,
+    /// `(row_id, url, engine)` for rows that were already in the order.
+    pub rediscovered: Vec<(i64, String, &'static str)>,
+}
+
+/// What a released first window actually persisted.
+pub(crate) struct FirstWindowResult<R> {
+    pub fresh: Vec<(i64, i64, FirstWindowRow<R>)>,
+    pub rediscovered_engines: Vec<(i64, String, Vec<String>)>,
+}
+
+/// Persists a whole buffered first window in one transaction. Same shape as
+/// [`commit_engine_round`], but for several engines' settlements merged and
+/// ranked together — the positions written here are the globally-ranked ones
+/// the subscriber is about to be shown, so the order the user sees, the
+/// persisted arrival order, and page 2's cursor cannot disagree.
+pub(crate) async fn commit_first_window<R: Serialize>(
+    pool: &SqlitePool,
+    params: FirstWindowCommit<R>,
+) -> Result<FirstWindowResult<R>, sqlx::Error> {
+    let FirstWindowCommit {
+        query_id,
+        order_id,
+        start_position,
+        fetched_at,
+        progress,
+        ranked,
+        rediscovered,
+    } = params;
+
+    let mut tx = pool.begin().await?;
+    touch_query(&mut tx, query_id, fetched_at).await?;
+    for (engine, next_start, exhausted) in &progress {
+        set_progress(&mut tx, query_id, engine, *next_start, *exhausted).await?;
+    }
+
+    for (row_id, _, engine) in &rediscovered {
+        attribute_engine(&mut tx, query_id, *row_id, engine).await?;
+    }
+
+    let mut committed = Vec::with_capacity(ranked.len());
+    for (offset, item) in ranked.into_iter().enumerate() {
+        let position = start_position + offset as i64;
+        let row_id = get_or_create_row(&mut tx, &item.url, &item.value).await?;
+        add_member(&mut tx, query_id, row_id).await?;
+        append_order_entry(&mut tx, order_id, row_id, position).await?;
+        for engine in &item.engines {
+            attribute_engine(&mut tx, query_id, row_id, engine).await?;
+        }
+        committed.push((row_id, position, item));
+    }
+
+    tx.commit().await?;
+
+    let mut rediscovered_engines = Vec::with_capacity(rediscovered.len());
+    let mut seen_rows = std::collections::HashSet::new();
+    for (row_id, url, _) in rediscovered {
+        if !seen_rows.insert(row_id) {
+            continue;
+        }
+        let engines = engines_for_row(pool, query_id, row_id).await?;
+        rediscovered_engines.push((row_id, url, engines));
+    }
+
+    Ok(FirstWindowResult {
+        fresh: committed,
+        rediscovered_engines,
+    })
+}
+
 pub async fn purge_stale_queries(
     pool: &SqlitePool,
     cutoff: chrono::NaiveDateTime,

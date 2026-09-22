@@ -10,8 +10,6 @@ import {
   isWithinPreloadRange,
   shouldAutoContinue,
   retryDelayMs,
-  shouldFlushFirstPaint,
-  sortBufferedByScore,
   SkeletonQueue,
   SSEParser,
   StreamStateReducer,
@@ -74,6 +72,19 @@ test("unwrapPayload extracts the Images variant", () => {
   assert.deepEqual(result, { results: [], engines: [], hasMore: false });
 });
 
+test("unwrapPayload extracts Tech and Programming variants", () => {
+  for (const variant of ["Tech", "Programming"]) {
+    const result = unwrapPayload({
+      [variant]: { results: [{ url: variant }], engines: [], hasMore: true },
+    });
+    assert.deepEqual(result, {
+      results: [{ url: variant }],
+      engines: [],
+      hasMore: true,
+    });
+  }
+});
+
 test("unwrapPayload defaults missing fields safely", () => {
   const result = unwrapPayload({ General: {} });
   assert.deepEqual(result, { results: [], engines: [], hasMore: false });
@@ -115,44 +126,6 @@ test("skeletonsNeeded caps outstanding placeholders at one page", () => {
   assert.equal(skeletonsNeeded(4, 10), 6);
   assert.equal(skeletonsNeeded(10, 10), 0);
   assert.equal(skeletonsNeeded(14, 10), 0);
-});
-
-test("shouldFlushFirstPaint waits until a flush condition is met", () => {
-  const base = { elapsedMs: 100, holdMs: 1200, isComplete: false, bufferedCount: 2, pageSize: 10 };
-
-  assert.equal(shouldFlushFirstPaint(base), false);
-});
-
-test("shouldFlushFirstPaint flushes on timeout", () => {
-  assert.equal(shouldFlushFirstPaint({ elapsedMs: 1200, holdMs: 1200, isComplete: false, bufferedCount: 2, pageSize: 10 }), true);
-});
-
-test("shouldFlushFirstPaint flushes when stream completes", () => {
-  assert.equal(shouldFlushFirstPaint({ elapsedMs: 100, holdMs: 1200, isComplete: true, bufferedCount: 2, pageSize: 10 }), true);
-});
-
-test("shouldFlushFirstPaint flushes when page fills", () => {
-  assert.equal(shouldFlushFirstPaint({ elapsedMs: 100, holdMs: 1200, isComplete: false, bufferedCount: 10, pageSize: 10 }), true);
-});
-
-test("sortBufferedByScore orders descending without mutating input", () => {
-  const entries = [
-    { result: { url: "low", score: 2 } },
-    { result: { url: "high", score: 9 } },
-  ];
-
-  assert.deepEqual(sortBufferedByScore(entries).map(entry => entry.result.url), ["high", "low"]);
-  assert.equal(entries[0].result.url, "low");
-});
-
-test("sortBufferedByScore preserves arrival order for equal and missing scores", () => {
-  const entries = [
-    { result: { url: "first", score: 0 } },
-    { result: { url: "second" } },
-    { result: { url: "third", score: 0 } },
-  ];
-
-  assert.deepEqual(sortBufferedByScore(entries).map(entry => entry.result.url), ["first", "second", "third"]);
 });
 
 test("canLoadNextPage blocks scroll loads while any request is active", () => {

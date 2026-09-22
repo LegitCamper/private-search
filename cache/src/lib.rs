@@ -46,7 +46,7 @@ use std::{
 use tokio::{
     sync::{Mutex as AsyncMutex, Notify, OnceCell, mpsc},
     task::JoinSet,
-    time::timeout,
+    time::{Instant, sleep_until, timeout},
 };
 
 pub use db::{OrderKind, init};
@@ -515,6 +515,146 @@ struct RunBuildParams<R: CacheableRow> {
     query_id: i64,
     sources: Vec<Arc<dyn EngineSource<R>>>,
     round_timeout: Duration,
+    first_window_hold: Option<Duration>,
+}
+
+/// Mutable per-build bookkeeping shared between the normal per-engine path
+/// and the first-window release below. Grouped into a struct only because
+/// passing seven `&mut`s positionally was unreadable.
+struct BuildState {
+    known_urls: HashMap<String, i64>,
+    position_of: HashMap<i64, i64>,
+    position: i64,
+    next_start: HashMap<&'static str, i64>,
+    exhausted: HashMap<&'static str, bool>,
+}
+
+/// Commits and emits a whole held-back first window at once.
+///
+/// The per-engine path ranks only one engine's rows and appends them in
+/// engine-arrival order, so whichever source answered first owns the top of
+/// the page regardless of relevance. Here every engine that settled inside
+/// the hold is merged, deduplicated, and ranked as one batch before a single
+/// position is assigned — and the positions written to SQLite are exactly
+/// the ones emitted, so page 2 and any later replay of this order agree with
+/// what the user was shown.
+#[allow(clippy::too_many_arguments)]
+async fn release_first_window<R: CacheableRow>(
+    pool: &SqlitePool,
+    ranker: &dyn Ranker<R>,
+    query: &str,
+    query_id: i64,
+    order_id: i64,
+    build: &Arc<Build<R>>,
+    buffered: Vec<(&'static str, Vec<R>)>,
+    round_start_urls: &HashSet<String>,
+    state: &mut BuildState,
+) -> Result<(), sqlx::Error> {
+    let mut progress = Vec::with_capacity(buffered.len());
+    let mut rediscovered: Vec<(i64, String, &'static str)> = Vec::new();
+    // Insertion-ordered so the pre-rank order is deterministic (and so a tie
+    // in the ranker resolves to the engine that answered first).
+    let mut fresh_order: Vec<String> = Vec::new();
+    let mut fresh: HashMap<String, (R, Vec<&'static str>)> = HashMap::new();
+
+    for (name, rows) in buffered {
+        let raw_count = rows.len();
+        let mut new_count = 0usize;
+        let mut seen_this_engine: HashSet<String> = HashSet::new();
+
+        for row in rows {
+            let url = row.url().to_string();
+            if !seen_this_engine.insert(url.clone()) {
+                continue;
+            }
+            if !round_start_urls.contains(&url) {
+                new_count += 1;
+            }
+            if let Some(&row_id) = state.known_urls.get(&url) {
+                rediscovered.push((row_id, url, name));
+            } else if let Some((_, engines)) = fresh.get_mut(&url) {
+                // Two engines in the same window found the same new URL:
+                // one row, both attributions.
+                engines.push(name);
+            } else {
+                fresh_order.push(url.clone());
+                fresh.insert(url, (row, vec![name]));
+            }
+        }
+
+        let source_exhausted = raw_count == 0 || new_count == 0;
+        state.exhausted.insert(name, source_exhausted);
+        let advanced = state.next_start[name] + raw_count as i64;
+        state.next_start.insert(name, advanced);
+        progress.push((name, advanced, source_exhausted));
+    }
+
+    let values: Vec<R> = fresh_order
+        .iter()
+        .filter_map(|url| fresh.get(url).map(|(value, _)| value.clone()))
+        .collect();
+    let ranked: Vec<db::FirstWindowRow<R>> = ranker
+        .rank(query, values)
+        .into_iter()
+        .map(|value| {
+            let url = value.url().to_string();
+            let engines = fresh
+                .get(&url)
+                .map(|(_, engines)| engines.clone())
+                .unwrap_or_default();
+            db::FirstWindowRow {
+                url,
+                value,
+                engines,
+            }
+        })
+        .collect();
+
+    let commit = db::commit_first_window(
+        pool,
+        db::FirstWindowCommit {
+            query_id,
+            order_id,
+            start_position: state.position,
+            fetched_at: chrono::Utc::now().naive_utc(),
+            progress,
+            ranked,
+            rediscovered,
+        },
+    )
+    .await?;
+
+    if !commit.fresh.is_empty() {
+        let mut positioned = Vec::with_capacity(commit.fresh.len());
+        for (row_id, pos, item) in commit.fresh {
+            state.known_urls.insert(item.url.clone(), row_id);
+            state.position_of.insert(row_id, pos);
+            positioned.push(PositionedRow {
+                position: pos as usize,
+                row: MergedRowResult {
+                    value: item.value,
+                    engines: item.engines.iter().map(|e| e.to_string()).collect(),
+                    cached: false,
+                },
+            });
+        }
+        state.position += positioned.len() as i64;
+        build.emit(CacheEvent::Results(positioned)).await;
+    }
+
+    for (row_id, url, engines) in commit.rediscovered_engines {
+        if let Some(&pos) = state.position_of.get(&row_id) {
+            build
+                .emit(CacheEvent::Attribution {
+                    position: pos as usize,
+                    url,
+                    engines,
+                })
+                .await;
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
@@ -528,6 +668,7 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
         query_id,
         sources,
         round_timeout,
+        first_window_hold,
     } = params;
     let order_id = build.order_id;
 
@@ -553,16 +694,23 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
     // this same arrival order), and replay it as an immediate "here's what's
     // cached so far" burst — this is also what makes the legacy collector
     // correct for a partially-covered window, not just a fresh one.
-    let mut known_urls: HashMap<String, i64> = HashMap::new();
-    let mut position_of: HashMap<i64, i64> = HashMap::new();
+    let mut state = BuildState {
+        known_urls: HashMap::new(),
+        position_of: HashMap::new(),
+        position: base_len,
+        next_start: HashMap::new(),
+        exhausted: HashMap::new(),
+    };
 
     if base_len > 0 {
         match db::get_order_window::<R>(&pool, order_id, query_id, 0, base_len as usize).await {
             Ok(prefix) => {
                 let mut positioned = Vec::with_capacity(prefix.len());
                 for entry in prefix {
-                    known_urls.insert(entry.row.url.clone(), entry.row.row_id);
-                    position_of.insert(entry.row.row_id, entry.position);
+                    state
+                        .known_urls
+                        .insert(entry.row.url.clone(), entry.row.row_id);
+                    state.position_of.insert(entry.row.row_id, entry.position);
                     positioned.push(PositionedRow {
                         position: entry.position as usize,
                         row: MergedRowResult {
@@ -584,13 +732,11 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
         }
     }
 
-    let mut next_start: HashMap<&'static str, i64> = HashMap::new();
-    let mut exhausted: HashMap<&'static str, bool> = HashMap::new();
     for src in &sources {
         match db::get_progress(&pool, query_id, src.name()).await {
             Ok((ns, ex)) => {
-                next_start.insert(src.name(), ns);
-                exhausted.insert(src.name(), ex);
+                state.next_start.insert(src.name(), ns);
+                state.exhausted.insert(src.name(), ex);
             }
             Err(e) => {
                 build.emit(CacheEvent::Error(e.to_string())).await;
@@ -605,16 +751,15 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
     // back-to-back is exactly the traffic pattern that gets an IP
     // bot-walled. They retry fresh on the next call/build instead.
     let mut failed_this_call: HashSet<&'static str> = HashSet::new();
-    let mut position = base_len;
 
-    for _round in 0..MAX_ROUNDS {
-        if build.finish_if_satisfied(position as usize) {
+    for round in 0..MAX_ROUNDS {
+        if build.finish_if_satisfied(state.position as usize) {
             break;
         }
 
         let needy: Vec<Arc<dyn EngineSource<R>>> = sources
             .iter()
-            .filter(|s| !exhausted[s.name()] && !failed_this_call.contains(s.name()))
+            .filter(|s| !state.exhausted[s.name()] && !failed_this_call.contains(s.name()))
             .cloned()
             .collect();
         if needy.is_empty() {
@@ -627,23 +772,115 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
         // continuously-updated `known_urls`) means two sources that
         // legitimately surface the same fresh URL in the same round don't
         // falsely mark each other exhausted.
-        let round_start_urls: HashSet<String> = known_urls.keys().cloned().collect();
+        let round_start_urls: HashSet<String> = state.known_urls.keys().cloned().collect();
 
         let mut set = JoinSet::new();
         for src in needy {
             let q = query.clone();
-            let start_for_src = next_start[src.name()] as usize;
+            let start_for_src = state.next_start[src.name()] as usize;
             set.spawn(async move {
                 let outcome = timeout(round_timeout, src.fetch_page(&q, start_for_src)).await;
                 (src.name(), outcome)
             });
         }
 
+        // Only the very first round of a first-page build can hold: later
+        // rounds and later pages must stay progressive, or every scroll would
+        // cost another full hold.
+        let deadline = if round == 0 {
+            first_window_hold.map(|hold| Instant::now() + hold)
+        } else {
+            None
+        };
+        let mut holding = deadline.is_some();
+        let mut buffered: Vec<(&'static str, Vec<R>)> = Vec::new();
+
         // `join_next` (not `join_all`/collecting into a `Vec` first) is the
         // whole point: each engine's settlement is committed and emitted the
         // instant it lands, so a fast source's rows reach subscribers while
-        // a slower one in this same round is still pending.
-        while let Some(joined) = set.join_next().await {
+        // a slower one in this same round is still pending. While `holding`,
+        // that is deliberately suspended for one round — see
+        // `release_first_window`.
+        loop {
+            let joined = match deadline {
+                Some(dl) if holding => {
+                    tokio::select! {
+                        biased;
+                        joined = set.join_next() => joined,
+                        _ = sleep_until(dl) => {
+                            holding = false;
+                            let taken = std::mem::take(&mut buffered);
+                            let names: Vec<&'static str> =
+                                taken.iter().map(|(name, _)| *name).collect();
+                            if let Err(e) = release_first_window(
+                                &pool,
+                                ranker.as_ref(),
+                                &query,
+                                query_id,
+                                order_id,
+                                &build,
+                                taken,
+                                &round_start_urls,
+                                &mut state,
+                            )
+                            .await
+                            {
+                                build.emit(CacheEvent::Error(e.to_string())).await;
+                                remove_build_from_registry(&registry, registry_key, &build).await;
+                                return;
+                            }
+                            for name in names {
+                                build
+                                    .emit(CacheEvent::Engine {
+                                        engine: name.to_string(),
+                                        outcome: EngineOutcome::Ok,
+                                    })
+                                    .await;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                _ => set.join_next().await,
+            };
+
+            let Some(joined) = joined else {
+                // Every task in the round settled. If the hold is still on,
+                // release now rather than waiting out a deadline that can no
+                // longer change the answer.
+                if holding {
+                    holding = false;
+                    let taken = std::mem::take(&mut buffered);
+                    let names: Vec<&'static str> = taken.iter().map(|(name, _)| *name).collect();
+                    if let Err(e) = release_first_window(
+                        &pool,
+                        ranker.as_ref(),
+                        &query,
+                        query_id,
+                        order_id,
+                        &build,
+                        taken,
+                        &round_start_urls,
+                        &mut state,
+                    )
+                    .await
+                    {
+                        build.emit(CacheEvent::Error(e.to_string())).await;
+                        remove_build_from_registry(&registry, registry_key, &build).await;
+                        return;
+                    }
+                    for name in names {
+                        build
+                            .emit(CacheEvent::Engine {
+                                engine: name.to_string(),
+                                outcome: EngineOutcome::Ok,
+                            })
+                            .await;
+                    }
+                }
+                break;
+            };
+
             let (name, outcome) = match joined {
                 Ok(v) => v,
                 Err(join_err) => {
@@ -653,6 +890,9 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
             };
 
             match outcome {
+                Ok(Ok(rows)) if holding => {
+                    buffered.push((name, rows));
+                }
                 Ok(Ok(rows)) => {
                     let raw_count = rows.len();
                     let mut new_count = 0usize;
@@ -668,15 +908,19 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                         if !round_start_urls.contains(&url) {
                             new_count += 1;
                         }
-                        if let Some(&row_id) = known_urls.get(&url) {
+                        if let Some(&row_id) = state.known_urls.get(&url) {
                             rediscovered.push((row_id, url));
                         } else {
                             fresh.push(db::FreshRow { url, value: r });
                         }
                     }
 
-                    exhausted.insert(name, raw_count == 0 || new_count == 0);
-                    next_start.insert(name, next_start[name] + raw_count as i64);
+                    state
+                        .exhausted
+                        .insert(name, raw_count == 0 || new_count == 0);
+                    state
+                        .next_start
+                        .insert(name, state.next_start[name] + raw_count as i64);
 
                     // The ranker only sees this engine's genuinely novel rows
                     // for this round; it drops the URL association, but every
@@ -696,10 +940,10 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                         db::EngineRoundCommit {
                             query_id,
                             order_id,
-                            start_position: position,
+                            start_position: state.position,
                             engine_name: name,
-                            next_start: next_start[name],
-                            exhausted: exhausted[name],
+                            next_start: state.next_start[name],
+                            exhausted: state.exhausted[name],
                             fetched_at: now,
                             fresh: ranked_fresh,
                             rediscovered,
@@ -719,8 +963,8 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                     if !commit.fresh.is_empty() {
                         let mut positioned = Vec::with_capacity(commit.fresh.len());
                         for (row_id, pos, item) in commit.fresh {
-                            known_urls.insert(item.url.clone(), row_id);
-                            position_of.insert(row_id, pos);
+                            state.known_urls.insert(item.url.clone(), row_id);
+                            state.position_of.insert(row_id, pos);
                             positioned.push(PositionedRow {
                                 position: pos as usize,
                                 row: MergedRowResult {
@@ -730,12 +974,12 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                                 },
                             });
                         }
-                        position += positioned.len() as i64;
+                        state.position += positioned.len() as i64;
                         build.emit(CacheEvent::Results(positioned)).await;
                     }
 
                     for (row_id, url, engines) in commit.rediscovered_engines {
-                        if let Some(&pos) = position_of.get(&row_id) {
+                        if let Some(&pos) = state.position_of.get(&row_id) {
                             build
                                 .emit(CacheEvent::Attribution {
                                     position: pos as usize,
@@ -784,7 +1028,9 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
 
     match finalize_canonical(&pool, ranker.as_ref(), &query, query_id, &sources).await {
         Ok((canonical_id, source_has_more)) => {
-            let order_len = db::order_len(&pool, order_id).await.unwrap_or(position);
+            let order_len = db::order_len(&pool, order_id)
+                .await
+                .unwrap_or(state.position);
             // `next_cursor` here is a build-internal convention: the order's
             // full length, not yet resolved to any one subscriber's cursor.
             // `transform_for_subscriber` does that resolution on delivery.
@@ -809,6 +1055,8 @@ pub struct MergedCache<R: CacheableRow> {
     pool: SqlitePool,
     namespace: &'static str,
     ranker: Arc<dyn Ranker<R>>,
+    /// See [`Self::with_first_window_hold`].
+    first_window_hold: Option<Duration>,
     /// At most one extending build per query. Requests against the same base
     /// order join it; requests against a different generation wait for it to
     /// finish and then re-evaluate persisted progress before starting. This
@@ -823,8 +1071,26 @@ impl<R: CacheableRow> MergedCache<R> {
             pool,
             namespace,
             ranker,
+            first_window_hold: None,
             builds: Arc::new(AsyncMutex::new(HashMap::new())),
         }
+    }
+
+    /// Holds the *first* page of an uncached query until every source in its
+    /// first round has settled, or `hold` elapses — whichever comes first —
+    /// then emits them ranked together as one batch.
+    ///
+    /// Without this, the top of a cold first page belongs to whichever source
+    /// answered first, not to the best result: rows are committed and emitted
+    /// per engine, and a `Ranker` only ever sees one engine's batch at a
+    /// time. The globally-ranked canonical order is computed, but only after
+    /// the page the user is already looking at.
+    ///
+    /// Only ever applies to `start == 0` of a build that has to contact
+    /// sources at all; cache hits and later pages stay fully progressive.
+    pub fn with_first_window_hold(mut self, hold: Duration) -> Self {
+        self.first_window_hold = Some(hold);
+        self
     }
 
     /// Serves `[start, start+count)` for `query` entirely from an
@@ -1045,6 +1311,11 @@ impl<R: CacheableRow> MergedCache<R> {
                 query_id,
                 sources,
                 round_timeout,
+                // Hold the first round whenever this build starts an empty
+                // order, even if a later-page request happened to create the
+                // build. A concurrent page-zero subscriber must not inherit
+                // engine-arrival ordering from that request.
+                first_window_hold: (base_len == 0).then_some(self.first_window_hold).flatten(),
             };
             tokio::spawn(async move {
                 let result = tokio::spawn(run_build(params)).await;
@@ -1371,6 +1642,321 @@ mod test {
             }
         }
         out
+    }
+
+    /// A ranker with a known total order, so a test can tell "emitted in
+    /// rank order" apart from "emitted in whichever engine answered first".
+    struct AlphabeticalRanker;
+    impl Ranker<TestRow> for AlphabeticalRanker {
+        fn rank(&self, _query: &str, mut batch: Vec<TestRow>) -> Vec<TestRow> {
+            batch.sort_by(|a, b| a.url.cmp(&b.url));
+            batch
+        }
+    }
+
+    /// A source that always fails, to prove a broken primary can't wedge the
+    /// hold open.
+    struct FailingSource(&'static str);
+
+    #[async_trait]
+    impl EngineSource<TestRow> for FailingSource {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+
+        async fn fetch_page(&self, _query: &str, _start: usize) -> Result<Vec<TestRow>, String> {
+            Err("nope".to_string())
+        }
+    }
+
+    async fn held_cache(hold: Duration) -> MergedCache<TestRow> {
+        test_cache_with_ranker(Arc::new(AlphabeticalRanker))
+            .await
+            .with_first_window_hold(hold)
+    }
+
+    fn result_urls(events: &[SequencedCacheEvent<TestRow>]) -> Vec<String> {
+        events
+            .iter()
+            .flat_map(|e| match &e.event {
+                CacheEvent::Results(rows) => rows.clone(),
+                _ => Vec::new(),
+            })
+            .map(|r| r.row.value.url)
+            .collect()
+    }
+
+    /// The core bug: a fast engine used to own the top of the page. With the
+    /// hold on, nothing paints until the slow engine lands, and then the
+    /// whole window is in rank order — "zzz" from the fast engine sinks
+    /// below "aaa" from the slow one.
+    #[tokio::test]
+    async fn first_window_emits_all_engines_ranked_together_not_in_arrival_order() {
+        let cache = held_cache(Duration::from_secs(5)).await;
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fast = ScriptedSource::new("Fast", vec![vec![row("zzz")]]);
+        let slow = GatedSource::new("Slow", gate.clone(), vec![row("aaa")]);
+
+        let mut sub = cache
+            .subscribe_or_extend(
+                "held",
+                sources(vec![fast])
+                    .into_iter()
+                    .chain(one_source(slow))
+                    .collect(),
+                0,
+                2,
+                None,
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !sub.snapshot
+                .iter()
+                .any(|e| matches!(e.event, CacheEvent::Results(_))),
+            "the fast engine's rows must not paint while a primary is pending"
+        );
+        // Metadata may arrive immediately, but no Results may arrive on the
+        // live channel until the slow engine is released.
+        let early_result = tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                match sub.live.recv().await {
+                    Some(SequencedCacheEvent {
+                        event: CacheEvent::Results(_),
+                        ..
+                    }) => return true,
+                    Some(_) => continue,
+                    None => return false,
+                }
+            }
+        })
+        .await;
+        assert!(
+            early_result.is_err(),
+            "no results may be emitted while a primary is still pending"
+        );
+
+        gate.notify_one();
+        let events = tokio::time::timeout(Duration::from_secs(5), drain_all(sub))
+            .await
+            .expect("build should finish once the gated source is released");
+
+        assert_eq!(result_urls(&events), vec!["aaa".to_string(), "zzz".into()]);
+    }
+
+    /// The order persisted to SQLite has to match what was emitted, or
+    /// page 2 and any replay of this order disagree with what the user saw.
+    #[tokio::test]
+    async fn first_window_persists_the_same_order_it_emitted() {
+        let cache = held_cache(Duration::from_secs(5)).await;
+        let fast = ScriptedSource::new("Fast", vec![vec![row("zzz")]]);
+        let also = ScriptedSource::new("Also", vec![vec![row("aaa")]]);
+
+        let result = cache
+            .get_or_extend(
+                "persisted",
+                &sources(vec![fast, also]),
+                0,
+                2,
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        let urls: Vec<String> = result.rows.iter().map(|r| r.value.url.clone()).collect();
+        assert_eq!(urls, vec!["aaa".to_string(), "zzz".into()]);
+
+        // Re-reading the same window must be a pure cache hit in that order.
+        let again = cache
+            .get_or_extend(
+                "persisted",
+                &sources(vec![ScriptedSource::new("Unused", vec![])]),
+                0,
+                2,
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        let again_urls: Vec<String> = again.rows.iter().map(|r| r.value.url.clone()).collect();
+        assert_eq!(again_urls, urls);
+    }
+
+    /// The hold is a cap, not a fixed delay: once every source has settled
+    /// there is nothing left to wait for.
+    #[tokio::test]
+    async fn all_sources_settling_releases_before_the_deadline() {
+        let cache = held_cache(Duration::from_secs(30)).await;
+        let a = ScriptedSource::new("A", vec![vec![row("a")]]);
+        let b = ScriptedSource::new("B", vec![vec![row("b")]]);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            cache.get_or_extend("quick", &sources(vec![a, b]), 0, 2, Duration::from_secs(5)),
+        )
+        .await
+        .expect("must not wait out the full 30s hold")
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+    }
+
+    /// A source that never answers must not hold the page past the cap, and
+    /// its rows must still append afterwards rather than being lost.
+    #[tokio::test]
+    async fn deadline_releases_the_partial_window_and_late_rows_still_append() {
+        let cache = held_cache(Duration::from_millis(100)).await;
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fast = ScriptedSource::new("Fast", vec![vec![row("zzz")]]);
+        let slow = GatedSource::new("Slow", gate.clone(), vec![row("aaa")]);
+
+        let mut sub = cache
+            .subscribe_or_extend(
+                "late",
+                sources(vec![fast])
+                    .into_iter()
+                    .chain(one_source(slow))
+                    .collect(),
+                0,
+                2,
+                None,
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match sub.live.recv().await.expect("stream ended early") {
+                    SequencedCacheEvent {
+                        event: CacheEvent::Results(rows),
+                        ..
+                    } => return rows,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("the deadline must release the partial window");
+
+        assert_eq!(first.len(), 1, "only the settled source's rows");
+        assert_eq!(first[0].row.value.url, "zzz");
+
+        gate.notify_one();
+        let rest = tokio::time::timeout(Duration::from_secs(5), drain_all(sub))
+            .await
+            .expect("build should finish");
+
+        // "aaa" ranks above "zzz" but arrives after it: already-rendered
+        // rows must never be reordered, only appended to.
+        assert_eq!(result_urls(&rest), vec!["aaa".to_string()]);
+    }
+
+    /// Failures are settlements too — otherwise a dead engine costs every
+    /// first page the full cap.
+    #[tokio::test]
+    async fn failing_sources_release_the_hold_without_waiting_it_out() {
+        let cache = held_cache(Duration::from_secs(30)).await;
+        let ok = ScriptedSource::new("Ok", vec![vec![row("a")]]);
+        let bad: Arc<dyn EngineSource<TestRow>> = Arc::new(FailingSource("Bad"));
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            cache.get_or_extend(
+                "failing",
+                &sources(vec![ok])
+                    .into_iter()
+                    .chain([bad])
+                    .collect::<Vec<_>>(),
+                0,
+                2,
+                Duration::from_secs(5),
+            ),
+        )
+        .await
+        .expect("a failed source must not hold the window open")
+        .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    /// Pagination must stay progressive: holding page 2 would make every
+    /// scroll cost the cap for no benefit, since its rows render below what
+    /// the user is already looking at.
+    #[tokio::test]
+    async fn later_pages_are_not_held() {
+        let cache = held_cache(Duration::from_secs(30)).await;
+        let source = ScriptedSource::new("Only", vec![vec![row("p0")], vec![row("p1")]]);
+        let all = one_source(source);
+
+        // Seed page 1 so the order has a prefix to paginate past.
+        let first = cache
+            .get_or_extend("paged", &all, 0, 1, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(first.rows.len(), 1);
+
+        let mut sub = cache
+            .subscribe_or_extend("paged", all, 1, 1, None, Duration::from_secs(5), None)
+            .await
+            .unwrap();
+
+        let saw_results = sub
+            .snapshot
+            .iter()
+            .any(|e| matches!(e.event, CacheEvent::Results(_)))
+            || tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match sub.live.recv().await {
+                        Some(SequencedCacheEvent {
+                            event: CacheEvent::Results(_),
+                            ..
+                        }) => return true,
+                        Some(_) => continue,
+                        None => return false,
+                    }
+                }
+            })
+            .await
+            .expect("page 2 must not wait out the 30s hold");
+
+        assert!(saw_results, "page 2 should still emit rows progressively");
+    }
+
+    /// A covered window never reaches a build at all, so the hold can't
+    /// apply — a repeat search stays instant.
+    #[tokio::test]
+    async fn a_cache_hit_bypasses_the_hold_entirely() {
+        let cache = held_cache(Duration::from_secs(30)).await;
+        let source = ScriptedSource::new("A", vec![vec![row("a"), row("b")]]);
+        let calls = source.calls.clone();
+
+        cache
+            .get_or_extend(
+                "hit",
+                &one_source(source.clone()),
+                0,
+                2,
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        let before = calls.load(Ordering::SeqCst);
+
+        let again = tokio::time::timeout(
+            Duration::from_secs(5),
+            cache.get_or_extend("hit", &one_source(source), 0, 2, Duration::from_secs(5)),
+        )
+        .await
+        .expect("a cache hit must not wait out the hold")
+        .unwrap();
+
+        assert_eq!(again.rows.len(), 2);
+        assert!(again.rows.iter().all(|r| r.cached));
+        assert_eq!(calls.load(Ordering::SeqCst), before, "no new source calls");
     }
 
     #[tokio::test]

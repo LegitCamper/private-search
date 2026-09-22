@@ -16,8 +16,8 @@ use rocket::{
 use rocket_dyn_templates::{Template, context};
 
 use private_search_engines::{
-    FetchError, ImageEngines, ImageResult, ImageSearchBuilder, SearchBuilder, SearchResponse,
-    SearchResult, SearchStream, SequencedStreamEvent, StreamEvent, init_db,
+    FetchError, ImageEngines, ImageResult, ImageSearchBuilder, SearchBuilder, SearchProfile,
+    SearchResponse, SearchResult, SearchStream, SequencedStreamEvent, StreamEvent, init_db,
 };
 
 mod rate_limit;
@@ -258,6 +258,8 @@ fn search(t: Option<String>, q: &str) -> Template {
 #[serde(crate = "rocket::serde")]
 pub enum QueryResults {
     General(SearchResponse<SearchResult>),
+    Tech(SearchResponse<SearchResult>),
+    Programming(SearchResponse<SearchResult>),
     Images(SearchResponse<ImageResult>),
 }
 
@@ -343,11 +345,26 @@ async fn query(
 
     let results = match tab {
         "General" | "general" => SearchBuilder::new(query)
+            .profile(SearchProfile::General)
             .start(start)
             .count(count)
             .search()
             .await
             .map(QueryResults::General),
+        "Tech" | "tech" => SearchBuilder::new(query)
+            .profile(SearchProfile::Tech)
+            .start(start)
+            .count(count)
+            .search()
+            .await
+            .map(QueryResults::Tech),
+        "Programming" | "programming" => SearchBuilder::new(query)
+            .profile(SearchProfile::Programming)
+            .start(start)
+            .count(count)
+            .search()
+            .await
+            .map(QueryResults::Programming),
         "Images" | "images" => ImageSearchBuilder::new(query)
             .engine(ImageEngines::Brave)
             .start(start)
@@ -369,7 +386,9 @@ async fn query(
 
 fn results_len(results: &QueryResults) -> usize {
     match results {
-        QueryResults::General(r) => r.results.len(),
+        QueryResults::General(r) | QueryResults::Tech(r) | QueryResults::Programming(r) => {
+            r.results.len()
+        }
         QueryResults::Images(r) => r.results.len(),
     }
 }
@@ -469,6 +488,31 @@ async fn query_stream(
     match tab {
         "General" | "general" => {
             let stream = SearchBuilder::new(query)
+                .profile(SearchProfile::General)
+                .start(start)
+                .count(count)
+                .order_token(order)
+                .after_sequence(after)
+                .stream()
+                .await
+                .map_err(|e| map_fetch_error(e, tab, query))?;
+            Ok(event_stream_from(stream))
+        }
+        "Tech" | "tech" => {
+            let stream = SearchBuilder::new(query)
+                .profile(SearchProfile::Tech)
+                .start(start)
+                .count(count)
+                .order_token(order)
+                .after_sequence(after)
+                .stream()
+                .await
+                .map_err(|e| map_fetch_error(e, tab, query))?;
+            Ok(event_stream_from(stream))
+        }
+        "Programming" | "programming" => {
+            let stream = SearchBuilder::new(query)
+                .profile(SearchProfile::Programming)
                 .start(start)
                 .count(count)
                 .order_token(order)
@@ -513,17 +557,35 @@ mod test {
     }
 
     #[rocket::async_test]
-    async fn index_renders() {
+    async fn index_renders_with_all_four_category_choices() {
         let client = client().await;
         let res = client.get("/").dispatch().await;
         assert_eq!(res.status(), Status::Ok);
+        let body = res.into_string().await.unwrap();
+
+        for value in ["general", "tech", "programming", "images"] {
+            assert!(
+                body.contains(&format!("name=\"t\" value=\"{value}\"")),
+                "missing homepage category {value}"
+            );
+        }
+        assert_eq!(body.matches(" checked").count(), 1);
+        assert!(body.contains("value=\"general\" checked"));
     }
 
     #[rocket::async_test]
-    async fn search_page_renders() {
+    async fn search_page_renders_with_all_four_category_links() {
         let client = client().await;
         let res = client.get("/search?q=rust&t=general").dispatch().await;
         assert_eq!(res.status(), Status::Ok);
+        let body = res.into_string().await.unwrap();
+
+        for tab in ["general", "tech", "programming", "images"] {
+            assert!(
+                body.contains(&format!("data-tab=\"{tab}\"")),
+                "missing results-page category {tab}"
+            );
+        }
     }
 
     #[rocket::async_test]

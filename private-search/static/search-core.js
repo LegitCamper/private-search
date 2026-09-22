@@ -30,7 +30,7 @@ export function unwrapPayload(obj) {
   const empty = { results: [], engines: [], hasMore: false };
   if (!obj || typeof obj !== "object") return empty;
 
-  const payload = obj.General || obj.Images;
+  const payload = obj.General || obj.Tech || obj.Programming || obj.Images;
   if (!payload) {
     console.warn("Unknown response variant:", obj);
     return empty;
@@ -55,14 +55,6 @@ export function getQueryParam(search, name) {
 // page back up instead of appending another complete page beneath it.
 export function skeletonsNeeded(queueLength, pageSize) {
   return Math.max(0, pageSize - queueLength);
-}
-
-export function shouldFlushFirstPaint({ elapsedMs, holdMs, isComplete, bufferedCount, pageSize }) {
-  return isComplete || elapsedMs >= holdMs || bufferedCount >= pageSize;
-}
-
-export function sortBufferedByScore(entries) {
-  return entries.slice().sort((a, b) => (b.result.score ?? 0) - (a.result.score ?? 0));
 }
 
 export function canLoadNextPage({ batchLoading, polling, hasMoreResults }) {
