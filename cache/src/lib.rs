@@ -72,13 +72,21 @@ pub trait Ranker<R: CacheableRow>: Send + Sync {
 
 /// Caller-supplied way to pull one more raw page from one upstream source
 /// (e.g. a search engine). Decouples this crate from knowing about any
-/// particular engine. `start` is that source's own raw offset — callers get
+/// particular engine. `start` is that source's own cursor — callers get
 /// it back via [`ExtendResult`]/progress tracking, never derived by the
 /// client.
 #[async_trait]
 pub trait EngineSource<R: CacheableRow>: Send + Sync {
     fn name(&self) -> &'static str;
-    async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<R>, String>;
+    /// Advances the upstream cursor independently of the merged result count.
+    fn next_start(&self, start: usize, result_count: usize) -> usize {
+        start.saturating_add(result_count)
+    }
+    /// Waits for local pacing outside the upstream request timeout.
+    async fn wait_ready(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<R>, EngineOutcome>;
 }
 
 #[derive(Debug)]
@@ -135,6 +143,8 @@ pub enum EngineOutcome {
     Ok,
     Failed(String),
     TimedOut,
+    /// Not an upstream failure; preserve progress without starting a cooldown.
+    Deferred(String),
 }
 
 pub struct ExtendResult<R> {
@@ -523,6 +533,7 @@ struct RunBuildParams<R: CacheableRow> {
 /// passing seven `&mut`s positionally was unreadable.
 struct BuildState {
     known_urls: HashMap<String, i64>,
+    source_urls: HashMap<String, HashSet<String>>,
     position_of: HashMap<i64, i64>,
     position: i64,
     next_start: HashMap<&'static str, i64>,
@@ -546,8 +557,7 @@ async fn release_first_window<R: CacheableRow>(
     query_id: i64,
     order_id: i64,
     build: &Arc<Build<R>>,
-    buffered: Vec<(&'static str, Vec<R>)>,
-    round_start_urls: &HashSet<String>,
+    buffered: Vec<(&'static str, Vec<R>, usize)>,
     state: &mut BuildState,
 ) -> Result<(), sqlx::Error> {
     let mut progress = Vec::with_capacity(buffered.len());
@@ -557,17 +567,18 @@ async fn release_first_window<R: CacheableRow>(
     let mut fresh_order: Vec<String> = Vec::new();
     let mut fresh: HashMap<String, (R, Vec<&'static str>)> = HashMap::new();
 
-    for (name, rows) in buffered {
+    for (name, rows, next_start) in buffered {
         let raw_count = rows.len();
         let mut new_count = 0usize;
         let mut seen_this_engine: HashSet<String> = HashSet::new();
+        let source_urls = state.source_urls.entry(name.to_owned()).or_default();
 
         for row in rows {
             let url = row.url().to_string();
             if !seen_this_engine.insert(url.clone()) {
                 continue;
             }
-            if !round_start_urls.contains(&url) {
+            if source_urls.insert(url.clone()) {
                 new_count += 1;
             }
             if let Some(&row_id) = state.known_urls.get(&url) {
@@ -584,7 +595,7 @@ async fn release_first_window<R: CacheableRow>(
 
         let source_exhausted = raw_count == 0 || new_count == 0;
         state.exhausted.insert(name, source_exhausted);
-        let advanced = state.next_start[name] + raw_count as i64;
+        let advanced = next_start as i64;
         state.next_start.insert(name, advanced);
         progress.push((name, advanced, source_exhausted));
     }
@@ -696,6 +707,7 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
     // correct for a partially-covered window, not just a fresh one.
     let mut state = BuildState {
         known_urls: HashMap::new(),
+        source_urls: HashMap::new(),
         position_of: HashMap::new(),
         position: base_len,
         next_start: HashMap::new(),
@@ -707,6 +719,13 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
             Ok(prefix) => {
                 let mut positioned = Vec::with_capacity(prefix.len());
                 for entry in prefix {
+                    for engine in &entry.row.engines {
+                        state
+                            .source_urls
+                            .entry(engine.clone())
+                            .or_default()
+                            .insert(entry.row.url.clone());
+                    }
                     state
                         .known_urls
                         .insert(entry.row.url.clone(), entry.row.row_id);
@@ -767,20 +786,23 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
             break;
         }
 
-        // Frozen at round start: judging "did this engine's page contain
-        // anything new" against this snapshot (rather than the live,
-        // continuously-updated `known_urls`) means two sources that
-        // legitimately surface the same fresh URL in the same round don't
-        // falsely mark each other exhausted.
-        let round_start_urls: HashSet<String> = state.known_urls.keys().cloned().collect();
-
         let mut set = JoinSet::new();
         for src in needy {
             let q = query.clone();
             let start_for_src = state.next_start[src.name()] as usize;
             set.spawn(async move {
-                let outcome = timeout(round_timeout, src.fetch_page(&q, start_for_src)).await;
-                (src.name(), outcome)
+                let outcome = match src.wait_ready().await {
+                    Ok(()) => match timeout(round_timeout, src.fetch_page(&q, start_for_src)).await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(EngineOutcome::TimedOut),
+                    },
+                    Err(message) => Err(EngineOutcome::Deferred(message)),
+                };
+                let next_start = outcome.as_ref().map_or(start_for_src, |rows| {
+                    src.next_start(start_for_src, rows.len())
+                });
+                (src.name(), next_start, outcome)
             });
         }
 
@@ -793,7 +815,7 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
             None
         };
         let mut holding = deadline.is_some();
-        let mut buffered: Vec<(&'static str, Vec<R>)> = Vec::new();
+        let mut buffered: Vec<(&'static str, Vec<R>, usize)> = Vec::new();
 
         // `join_next` (not `join_all`/collecting into a `Vec` first) is the
         // whole point: each engine's settlement is committed and emitted the
@@ -811,7 +833,7 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                             holding = false;
                             let taken = std::mem::take(&mut buffered);
                             let names: Vec<&'static str> =
-                                taken.iter().map(|(name, _)| *name).collect();
+                                taken.iter().map(|(name, _, _)| *name).collect();
                             if let Err(e) = release_first_window(
                                 &pool,
                                 ranker.as_ref(),
@@ -820,7 +842,6 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                                 order_id,
                                 &build,
                                 taken,
-                                &round_start_urls,
                                 &mut state,
                             )
                             .await
@@ -851,7 +872,7 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                 if holding {
                     holding = false;
                     let taken = std::mem::take(&mut buffered);
-                    let names: Vec<&'static str> = taken.iter().map(|(name, _)| *name).collect();
+                    let names: Vec<&'static str> = taken.iter().map(|(name, _, _)| *name).collect();
                     if let Err(e) = release_first_window(
                         &pool,
                         ranker.as_ref(),
@@ -860,7 +881,6 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                         order_id,
                         &build,
                         taken,
-                        &round_start_urls,
                         &mut state,
                     )
                     .await
@@ -881,7 +901,7 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                 break;
             };
 
-            let (name, outcome) = match joined {
+            let (name, next_start, outcome) = match joined {
                 Ok(v) => v,
                 Err(join_err) => {
                     log::warn!("engine task join error: {join_err}");
@@ -890,22 +910,23 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
             };
 
             match outcome {
-                Ok(Ok(rows)) if holding => {
-                    buffered.push((name, rows));
+                Ok(rows) if holding => {
+                    buffered.push((name, rows, next_start));
                 }
-                Ok(Ok(rows)) => {
+                Ok(rows) => {
                     let raw_count = rows.len();
                     let mut new_count = 0usize;
                     let mut fresh: Vec<db::FreshRow<R>> = Vec::new();
                     let mut rediscovered: Vec<(i64, String)> = Vec::new();
                     let mut seen_this_engine: HashSet<String> = HashSet::new();
+                    let source_urls = state.source_urls.entry(name.to_owned()).or_default();
 
                     for r in rows {
                         let url = r.url().to_string();
                         if !seen_this_engine.insert(url.clone()) {
                             continue;
                         }
-                        if !round_start_urls.contains(&url) {
+                        if source_urls.insert(url.clone()) {
                             new_count += 1;
                         }
                         if let Some(&row_id) = state.known_urls.get(&url) {
@@ -918,9 +939,7 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                     state
                         .exhausted
                         .insert(name, raw_count == 0 || new_count == 0);
-                    state
-                        .next_start
-                        .insert(name, state.next_start[name] + raw_count as i64);
+                    state.next_start.insert(name, next_start as i64);
 
                     // The ranker only sees this engine's genuinely novel rows
                     // for this round; it drops the URL association, but every
@@ -997,23 +1016,13 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                         })
                         .await;
                 }
-                Ok(Err(e)) => {
-                    log::warn!("source \"{name}\" failed: {e}");
+                Err(outcome) => {
+                    log::warn!("source \"{name}\": {outcome:?}");
                     failed_this_call.insert(name);
                     build
                         .emit(CacheEvent::Engine {
                             engine: name.to_string(),
-                            outcome: EngineOutcome::Failed(e),
-                        })
-                        .await;
-                }
-                Err(_) => {
-                    log::warn!("source \"{name}\" timed out");
-                    failed_this_call.insert(name);
-                    build
-                        .emit(CacheEvent::Engine {
-                            engine: name.to_string(),
-                            outcome: EngineOutcome::TimedOut,
+                            outcome,
                         })
                         .await;
                 }
@@ -1502,7 +1511,11 @@ mod test {
             self.name
         }
 
-        async fn fetch_page(&self, _query: &str, _start: usize) -> Result<Vec<TestRow>, String> {
+        async fn fetch_page(
+            &self,
+            _query: &str,
+            _start: usize,
+        ) -> Result<Vec<TestRow>, EngineOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.pages.lock().unwrap().pop_front().unwrap_or_default())
         }
@@ -1534,7 +1547,11 @@ mod test {
             self.name
         }
 
-        async fn fetch_page(&self, _query: &str, _start: usize) -> Result<Vec<TestRow>, String> {
+        async fn fetch_page(
+            &self,
+            _query: &str,
+            _start: usize,
+        ) -> Result<Vec<TestRow>, EngineOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.page.clone())
         }
@@ -1571,7 +1588,11 @@ mod test {
             self.name
         }
 
-        async fn fetch_page(&self, _query: &str, _start: usize) -> Result<Vec<TestRow>, String> {
+        async fn fetch_page(
+            &self,
+            _query: &str,
+            _start: usize,
+        ) -> Result<Vec<TestRow>, EngineOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.gate.notified().await;
             Ok(self.page.clone())
@@ -1664,8 +1685,12 @@ mod test {
             self.0
         }
 
-        async fn fetch_page(&self, _query: &str, _start: usize) -> Result<Vec<TestRow>, String> {
-            Err("nope".to_string())
+        async fn fetch_page(
+            &self,
+            _query: &str,
+            _start: usize,
+        ) -> Result<Vec<TestRow>, EngineOutcome> {
+            Err(EngineOutcome::Failed("nope".to_string()))
         }
     }
 
@@ -2082,6 +2107,97 @@ mod test {
     }
 
     #[tokio::test]
+    async fn a_late_source_can_page_past_results_already_found_by_another_engine() {
+        let cache = test_cache().await;
+        let first = ScriptedSource::new("First", vec![vec![row("shared")]]);
+        cache
+            .get_or_extend("q", &one_source(first), 0, 1, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let late = ScriptedSource::new("Late", vec![vec![row("shared")], vec![row("new")]]);
+        let result = cache
+            .get_or_extend("q", &one_source(late.clone()), 1, 1, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(result.rows[0].value.url, "new");
+        assert_eq!(late.calls.load(Ordering::SeqCst), 2);
+    }
+
+    struct PagedSource {
+        starts: StdMutex<Vec<usize>>,
+    }
+
+    #[async_trait]
+    impl EngineSource<TestRow> for PagedSource {
+        fn name(&self) -> &'static str {
+            "Paged"
+        }
+
+        fn next_start(&self, start: usize, _result_count: usize) -> usize {
+            start + 20
+        }
+
+        async fn wait_ready(&self) -> Result<(), String> {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(())
+        }
+
+        async fn fetch_page(
+            &self,
+            _query: &str,
+            start: usize,
+        ) -> Result<Vec<TestRow>, EngineOutcome> {
+            self.starts.lock().unwrap().push(start);
+            Ok(match start {
+                0 => vec![row("first")],
+                20 => vec![row("second")],
+                40 => vec![row("third")],
+                60 => vec![],
+                _ => panic!("unexpected engine cursor: {start}"),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_cursors_survive_held_windows_and_queue_waits_do_not_time_out() {
+        for hold in [Duration::ZERO, Duration::from_millis(100)] {
+            let cache = test_cache().await.with_first_window_hold(hold);
+            let source = Arc::new(PagedSource {
+                starts: StdMutex::new(Vec::new()),
+            });
+            let result = cache
+                .get_or_extend(
+                    "q",
+                    &one_source(source.clone()),
+                    0,
+                    3,
+                    Duration::from_millis(5),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.rows.len(), 3);
+            assert!(
+                result
+                    .engine_outcomes
+                    .iter()
+                    .all(|(_, outcome)| matches!(outcome, EngineOutcome::Ok))
+            );
+            let last = cache
+                .get_or_extend(
+                    "q",
+                    &one_source(source.clone()),
+                    3,
+                    1,
+                    Duration::from_millis(5),
+                )
+                .await
+                .unwrap();
+            assert!(!last.has_more);
+            assert_eq!(*source.starts.lock().unwrap(), vec![0, 20, 40, 60]);
+        }
+    }
+
+    #[tokio::test]
     async fn has_more_reflects_the_source_that_is_still_alive() {
         let cache = test_cache().await;
         let short = ScriptedSource::new("Short", vec![vec![row("s1")], vec![]]);
@@ -2224,7 +2340,11 @@ mod test {
             "Slow"
         }
 
-        async fn fetch_page(&self, _query: &str, start: usize) -> Result<Vec<TestRow>, String> {
+        async fn fetch_page(
+            &self,
+            _query: &str,
+            start: usize,
+        ) -> Result<Vec<TestRow>, EngineOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(50)).await;
             if start > 0 {
@@ -2792,8 +2912,8 @@ mod test {
                 &self,
                 _query: &str,
                 _start: usize,
-            ) -> Result<Vec<TestRow>, String> {
-                Err("upstream exploded".to_string())
+            ) -> Result<Vec<TestRow>, EngineOutcome> {
+                Err(EngineOutcome::Failed("upstream exploded".to_string()))
             }
         }
 

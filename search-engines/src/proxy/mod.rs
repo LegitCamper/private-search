@@ -159,6 +159,7 @@ where
                         let _ = error;
                     }
                     error @ EngineError::ParseError(_) => proxy_parse_error = Some(error),
+                    error @ EngineError::PaginationExpired(_) => return Err(error),
                 },
             }
         }

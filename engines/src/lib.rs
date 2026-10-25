@@ -145,6 +145,41 @@ fn record_success(engine: &'static str) {
     cooldowns().lock().unwrap().remove(engine);
 }
 
+async fn wait_for_engine(engine: &'static str) -> Result<(), String> {
+    static BRAVE: OnceLock<tokio::sync::Mutex<tokio::time::Instant>> = OnceLock::new();
+    static DUCKDUCKGO: OnceLock<tokio::sync::Mutex<tokio::time::Instant>> = OnceLock::new();
+    let gate = match engine {
+        "Brave" => &BRAVE,
+        "DuckDuckGo" => &DUCKDUCKGO,
+        _ => return Ok(()),
+    };
+    reserve_engine_slot(
+        gate.get_or_init(|| tokio::sync::Mutex::new(tokio::time::Instant::now())),
+        engine,
+        resolve_secs("ENGINE_REQUEST_INTERVAL_SECS", 3),
+    )
+    .await
+}
+
+async fn reserve_engine_slot(
+    gate: &tokio::sync::Mutex<tokio::time::Instant>,
+    engine: &'static str,
+    interval: Duration,
+) -> Result<(), String> {
+    let mut next_request = gate.lock().await;
+    if let Some(remaining) = cooldown_remaining(engine) {
+        return Err(format!("retry in {}s", remaining.as_secs()));
+    }
+    tokio::time::sleep_until(*next_request).await;
+    if let Some(remaining) = cooldown_remaining(engine) {
+        return Err(format!("retry in {}s", remaining.as_secs()));
+    }
+    *next_request = tokio::time::Instant::now()
+        .checked_add(interval)
+        .ok_or_else(|| "ENGINE_REQUEST_INTERVAL_SECS is too large".to_owned())?;
+    Ok(())
+}
+
 pub async fn init_db() {
     search_cache::shared_pool().await;
 }
@@ -289,10 +324,7 @@ pub enum EngineStatus {
     Ok,
     TimedOut,
     Failed(String),
-    /// Skipped this call, without being contacted, because it's still
-    /// cooling down from a recent failure. Never produced by the cache (see
-    /// `From<&EngineOutcome>` below) — it's synthesized in the builder for
-    /// engines it deliberately didn't pass along as sources.
+    /// Skipped because of an active cooldown or an unavailable pagination session.
     CoolingDown(String),
 }
 
@@ -302,6 +334,7 @@ impl From<&EngineOutcome> for EngineStatus {
             EngineOutcome::Ok => EngineStatus::Ok,
             EngineOutcome::TimedOut => EngineStatus::TimedOut,
             EngineOutcome::Failed(msg) => EngineStatus::Failed(msg.clone()),
+            EngineOutcome::Deferred(msg) => EngineStatus::CoolingDown(msg.clone()),
         }
     }
 }
@@ -616,6 +649,13 @@ struct TextSource<E> {
     engine: E,
 }
 
+fn source_error(error: search_engines::EngineError) -> EngineOutcome {
+    match error {
+        search_engines::EngineError::PaginationExpired(message) => EngineOutcome::Deferred(message),
+        error => EngineOutcome::Failed(error.to_string()),
+    }
+}
+
 #[async_trait]
 impl<E> EngineSource<CachedResult> for TextSource<E>
 where
@@ -625,7 +665,19 @@ where
         self.engine.name()
     }
 
-    async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<CachedResult>, String> {
+    fn next_start(&self, start: usize, result_count: usize) -> usize {
+        self.engine.next_start(start, result_count)
+    }
+
+    async fn wait_ready(&self) -> Result<(), String> {
+        wait_for_engine(self.name()).await
+    }
+
+    async fn fetch_page(
+        &self,
+        query: &str,
+        start: usize,
+    ) -> Result<Vec<CachedResult>, EngineOutcome> {
         self.engine
             .search_results(query, start, ENGINE_PAGE_HINT)
             .await
@@ -638,7 +690,7 @@ where
                     })
                     .collect()
             })
-            .map_err(|e| e.to_string())
+            .map_err(source_error)
     }
 }
 
@@ -654,7 +706,15 @@ where
         self.0.name()
     }
 
-    async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<CachedImage>, String> {
+    async fn wait_ready(&self) -> Result<(), String> {
+        wait_for_engine(self.name()).await
+    }
+
+    async fn fetch_page(
+        &self,
+        query: &str,
+        start: usize,
+    ) -> Result<Vec<CachedImage>, EngineOutcome> {
         self.0
             .search_images(query, start, ENGINE_PAGE_HINT)
             .await
@@ -666,7 +726,7 @@ where
                     })
                     .collect()
             })
-            .map_err(|e| e.to_string())
+            .map_err(source_error)
     }
 }
 
@@ -940,10 +1000,11 @@ fn record_outcomes<E: Copy>(
 ) {
     for &e in usable {
         let name = name_of(e);
-        if let Some((_, outcome)) = outcomes.iter().find(|(n, _)| n == name) {
+        if let Some((_, outcome)) = outcomes.iter().rev().find(|(n, _)| n == name) {
             match outcome {
                 EngineOutcome::Ok => record_success(name),
                 EngineOutcome::Failed(_) | EngineOutcome::TimedOut => record_failure(name),
+                EngineOutcome::Deferred(_) => {}
             }
         }
     }
@@ -971,6 +1032,7 @@ fn build_reports<E: Copy + PartialEq>(
             } else {
                 let status = outcomes
                     .iter()
+                    .rev()
                     .find(|(n, _)| n == name)
                     .map(|(_, o)| EngineStatus::from(o))
                     .unwrap_or(EngineStatus::Ok);
@@ -1071,6 +1133,7 @@ where
 #[derive(Default)]
 struct StreamAccumulator {
     any_results: bool,
+    temporarily_unavailable: bool,
     outcomes: Vec<(String, EngineOutcome)>,
 }
 
@@ -1121,7 +1184,7 @@ where
     acc.observe(&event);
     let is_done = matches!(event, CacheEvent::Done { .. });
     let is_terminal = is_done || matches!(event, CacheEvent::Error(_));
-    let mapped = if is_done {
+    let mut mapped = if is_done {
         match acc.terminal_error_message(usable_is_empty) {
             Some(message) => StreamEvent::Error(StreamErrorPayload { message }),
             None => map_cache_event(query, event, convert),
@@ -1129,6 +1192,9 @@ where
     } else {
         map_cache_event(query, event, convert)
     };
+    if let StreamEvent::Done(done) = &mut mapped {
+        done.has_more |= acc.temporarily_unavailable;
+    }
     (mapped, is_terminal)
 }
 
@@ -1162,6 +1228,7 @@ where
         is_owner,
     } = subscription;
 
+    let temporarily_unavailable = !cooling_reports.is_empty();
     let mut out_snapshot: Vec<SequencedStreamEvent<T>> = cooling_reports
         .into_iter()
         .map(|report| SequencedStreamEvent {
@@ -1170,7 +1237,10 @@ where
         })
         .collect();
 
-    let mut acc = StreamAccumulator::default();
+    let mut acc = StreamAccumulator {
+        temporarily_unavailable,
+        ..StreamAccumulator::default()
+    };
     let mut terminal = false;
 
     for seq_event in snapshot {
@@ -1378,7 +1448,7 @@ impl SearchBuilder {
         Ok(SearchResponse {
             results,
             engines: reports,
-            has_more: extend.has_more,
+            has_more: extend.has_more || !cooling.is_empty(),
         })
     }
 
@@ -1591,7 +1661,7 @@ impl ImageSearchBuilder {
         Ok(SearchResponse {
             results,
             engines: reports,
-            has_more: extend.has_more,
+            has_more: extend.has_more || !cooling.is_empty(),
         })
     }
 
@@ -1643,6 +1713,62 @@ impl ImageSearchBuilder {
 mod test {
     use super::*;
     use search_cache::PositionedRow;
+
+    #[tokio::test]
+    async fn requests_share_pacing_and_queued_work_rechecks_cooldown() {
+        let name = "paced-test-engine";
+        let gate = tokio::sync::Mutex::new(tokio::time::Instant::now());
+        let interval = Duration::from_millis(20);
+        let request = || async {
+            reserve_engine_slot(&gate, name, interval).await.unwrap();
+            tokio::time::Instant::now()
+        };
+        let (first, second, third) = tokio::join!(request(), request(), request());
+        assert!(second.duration_since(first) >= interval - Duration::from_millis(1));
+        assert!(third.duration_since(second) >= interval - Duration::from_millis(1));
+        record_failure(name);
+        assert!(reserve_engine_slot(&gate, name, interval).await.is_err());
+        record_success(name);
+    }
+
+    #[test]
+    fn later_page_failure_is_not_hidden_by_first_page_success() {
+        let name = "later-page-failure-test";
+        let outcomes = vec![
+            (name.into(), EngineOutcome::Ok),
+            (name.into(), EngineOutcome::Failed("blocked".into())),
+        ];
+        record_outcomes(&[name], |name| name, &outcomes);
+        assert!(cooldown_remaining(name).is_some());
+        let reports = build_reports(&[name], |name| name, &[], &outcomes);
+        assert!(matches!(reports[0].status, EngineStatus::Failed(_)));
+        record_success(name);
+    }
+
+    #[test]
+    fn expired_pagination_does_not_disable_the_engine() {
+        let name = "expired-pagination-test";
+        let outcome = source_error(search_engines::EngineError::PaginationExpired(
+            "expired".into(),
+        ));
+        assert!(matches!(outcome, EngineOutcome::Deferred(_)));
+        record_outcomes(&[name], |name| name, &[(name.into(), outcome)]);
+        assert!(cooldown_remaining(name).is_none());
+    }
+
+    #[test]
+    fn cached_results_with_cooling_sources_do_not_claim_exhaustion() {
+        let mut acc = StreamAccumulator {
+            any_results: true,
+            temporarily_unavailable: true,
+            ..StreamAccumulator::default()
+        };
+        let (event, _) = map_and_observe(&mut acc, true, "q", done_event(1), convert_for_test);
+        assert!(matches!(
+            event,
+            StreamEvent::Done(StreamDone { has_more: true, .. })
+        ));
+    }
 
     /// Tests exercise the stream/mapping plumbing, not scoring policy, so
     /// they all go through one profile.

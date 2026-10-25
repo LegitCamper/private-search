@@ -49,6 +49,10 @@ fn looks_like_image_results(html: &str) -> bool {
 
 #[async_trait]
 impl SearchEngine for Brave {
+    fn next_start(&self, start: usize, _result_count: usize) -> usize {
+        (start / BRAVE_RESULTS_PER_PAGE + 1).saturating_mul(BRAVE_RESULTS_PER_PAGE)
+    }
+
     async fn search_results(
         &self,
         query: &str,
@@ -163,6 +167,16 @@ pub fn parse_image_response(html: &str) -> Result<Vec<RawImage>, EngineError> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn filtered_pages_advance_by_upstream_page_not_parsed_count() {
+        for count in [1, 12, 19, 20, 23] {
+            let next = Brave.next_start(0, count);
+            assert_eq!(next, 20);
+            assert!(build_search_url("rust", next).ends_with("&offset=1"));
+            assert_eq!(Brave.next_start(next, count), 40);
+        }
+    }
 
     #[test]
     fn build_search_url_omits_offset_on_first_page() {

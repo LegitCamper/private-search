@@ -17,13 +17,16 @@ use crate::{
 pub struct DuckDuckGo;
 
 const POST_URL: &str = "https://html.duckduckgo.com/html/";
-const VQD_TTL: Duration = Duration::from_secs(60 * 60);
-// Keep tokens in this bounded, process-local map because `search-engines` is
-// the pure adapter layer and must not depend on the project's SQLite cache.
-/// A cached `vqd` pagination token, the route that earned it, and when it was
-/// stored — pages 2+ must replay the same route or the token is rejected.
-type VqdEntry = (String, RouteId, Instant);
-static VQD_CACHE: OnceLock<Mutex<HashMap<String, VqdEntry>>> = OnceLock::new();
+const CONTINUATION_TTL: Duration = Duration::from_secs(60 * 60);
+type Form = Vec<(String, String)>;
+#[derive(Clone)]
+struct Continuation {
+    form: Option<Form>,
+    route: RouteId,
+    stored_at: Instant,
+}
+type Continuations = HashMap<(String, usize), Continuation>;
+static CONTINUATIONS: OnceLock<Mutex<Continuations>> = OnceLock::new();
 
 impl EngineInfo for DuckDuckGo {
     fn name(&self) -> &'static str {
@@ -31,61 +34,79 @@ impl EngineInfo for DuckDuckGo {
     }
 }
 
-fn extract_vqd(html: &str) -> Option<String> {
+fn extract_next_form(html: &str, current_offset: usize) -> Option<Form> {
     let document = Html::parse_document(html);
-    let selector = Selector::parse("input[name=\"vqd\"]").ok()?;
+    let forms = Selector::parse("form").ok()?;
+    let inputs = Selector::parse("input[type=hidden][name]").ok()?;
     document
-        .select(&selector)
-        .next()
-        .and_then(|input| input.value().attr("value"))
-        .map(str::to_owned)
+        .select(&forms)
+        .map(|form| {
+            form.select(&inputs)
+                .filter_map(|input| {
+                    Some((
+                        input.value().attr("name")?.to_owned(),
+                        input.value().attr("value").unwrap_or_default().to_owned(),
+                    ))
+                })
+                .collect::<Form>()
+        })
+        .find(|form| {
+            form_offset(form).is_some_and(|offset| offset > current_offset)
+                && form
+                    .iter()
+                    .any(|(name, value)| name == "vqd" && !value.is_empty())
+        })
 }
 
-fn cached_vqd(query: &str) -> Option<(String, RouteId)> {
-    let cache = VQD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+fn form_offset(form: &Form) -> Option<usize> {
+    form.iter()
+        .find(|(name, _)| name == "s")
+        .and_then(|(_, value)| value.parse().ok())
+}
+
+fn cached_continuation(query: &str, start: usize) -> Option<Continuation> {
+    let cache = CONTINUATIONS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().ok()?;
-    let now = Instant::now();
-    let (vqd, route, stored_at) = cache
-        .get_key_value(query)
-        .map(|(_, (vqd, route, stored_at))| (vqd.clone(), route.clone(), *stored_at))?;
-    if now.duration_since(stored_at) >= VQD_TTL {
-        cache.remove(query);
+    let key = (query.to_owned(), start);
+    let entry = cache.get(&key)?;
+    if entry.stored_at.elapsed() >= CONTINUATION_TTL {
+        cache.remove(&key);
         return None;
     }
-    Some((vqd, route))
+    Some(entry.clone())
 }
 
-fn store_vqd(query: &str, vqd: String, route: RouteId) {
-    let cache = VQD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+fn store_continuation(query: &str, start: usize, form: Option<Form>, route: RouteId) {
+    let cache = CONTINUATIONS.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(mut cache) = cache.lock() else {
         return;
     };
     let now = Instant::now();
-    cache.retain(|_, (_, _, stored_at)| now.duration_since(*stored_at) < VQD_TTL);
-    cache.insert(query.to_owned(), (vqd, route, now));
-}
-
-fn evict_vqd(query: &str) {
-    if let Some(cache) = VQD_CACHE.get()
-        && let Ok(mut cache) = cache.lock()
+    cache.retain(|_, entry| now.duration_since(entry.stored_at) < CONTINUATION_TTL);
+    if cache.len() >= 512
+        && let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.stored_at)
+            .map(|(key, _)| key.clone())
     {
-        cache.remove(query);
+        cache.remove(&oldest);
     }
+    cache.insert(
+        (query.to_owned(), start),
+        Continuation {
+            form,
+            route,
+            stored_at: now,
+        },
+    );
 }
 
-fn build_form(query: &str, start: usize, vqd: Option<&str>) -> Vec<(&'static str, String)> {
-    let mut form = vec![
-        ("q", query.to_owned()),
-        ("b", String::new()),
-        ("kl", "wt-wt".to_owned()),
-    ];
-    if start > 0 {
-        form.extend([("s", start.to_string()), ("dc", (start + 1).to_string())]);
-        if let Some(vqd) = vqd {
-            form.push(("vqd", vqd.to_owned()));
-        }
-    }
-    form
+fn build_form(query: &str) -> Form {
+    vec![
+        ("q".into(), query.to_owned()),
+        ("b".into(), String::new()),
+        ("kl".into(), "wt-wt".to_owned()),
+    ]
 }
 
 // A real DDG results page always has this wrapper, even with 0 hits; the
@@ -117,54 +138,44 @@ async fn search_results_at(
     query: &str,
     start: usize,
 ) -> Result<Vec<RawResult>, EngineError> {
-    let cached = (start > 0).then(|| cached_vqd(query)).flatten();
-    if start > 0 && cached.is_none() {
-        // DDG reads a paginated request without a `vqd` as bot traffic.
-        return Err(EngineError::Blocked {
-            kind: BlockKind::Captcha,
-            retry_after: None,
-            detail: "DuckDuckGo pagination requires a vqd token".into(),
-        });
-    }
-    let (vqd, pinned) = cached
-        .map(|(vqd, route)| (Some(vqd), Some(route)))
-        .unwrap_or((None, None));
+    let (form, pinned) = if start == 0 {
+        (build_form(query), None)
+    } else {
+        let continuation = cached_continuation(query, start).ok_or_else(|| {
+            EngineError::PaginationExpired("DuckDuckGo continuation is unavailable".into())
+        })?;
+        let Some(form) = continuation.form else {
+            return Ok(Vec::new());
+        };
+        (form, Some(continuation.route))
+    };
 
     if pinned.as_ref().is_some_and(|route| {
         proxy::enabled_for("DuckDuckGo") && proxy::pinned_route(route, "DuckDuckGo").is_none()
     }) {
-        evict_vqd(query);
-        return Err(EngineError::Blocked {
-            kind: BlockKind::Captcha,
-            retry_after: None,
-            detail: "DuckDuckGo pinned proxy is unavailable".into(),
-        });
+        return Err(EngineError::PaginationExpired(
+            "DuckDuckGo pinned proxy is unavailable".into(),
+        ));
     }
 
-    let won = match proxy::race(
+    let won = proxy::race(
         Plan {
             engine: "DuckDuckGo",
             target: base_url,
             pinned,
         },
-        |route| fetch_results(route, base_url, query, start, vqd.as_deref()),
+        |route| fetch_results(route, base_url, &form),
     )
-    .await
-    {
-        Ok(won) => won,
-        Err(error) => {
-            if start > 0 {
-                evict_vqd(query);
-            }
-            return Err(error);
-        }
-    };
+    .await?;
 
-    let (results, new_vqd) = won.value;
-    if start == 0
-        && let Some(vqd) = new_vqd
-    {
-        store_vqd(query, vqd, won.route);
+    let (results, next_form) = won.value;
+    if !results.is_empty() {
+        store_continuation(
+            query,
+            start.saturating_add(results.len()),
+            next_form,
+            won.route,
+        );
     }
     Ok(results)
 }
@@ -172,15 +183,13 @@ async fn search_results_at(
 async fn fetch_results(
     route: Route,
     base_url: &str,
-    query: &str,
-    start: usize,
-    vqd: Option<&str>,
-) -> Result<(Vec<RawResult>, Option<String>), EngineError> {
+    form: &Form,
+) -> Result<(Vec<RawResult>, Option<Form>), EngineError> {
     let resp = route
         .client()
         .post(base_url)
         .header(reqwest::header::REFERER, "https://html.duckduckgo.com/")
-        .form(&build_form(query, start, vqd))
+        .form(form)
         .send()
         .await
         .map_err(EngineError::ReqwestError)?;
@@ -203,7 +212,10 @@ async fn fetch_results(
         ));
     }
 
-    Ok((parse_response(&html)?, extract_vqd(&html)))
+    Ok((
+        parse_response(&html)?,
+        extract_next_form(&html, form_offset(form).unwrap_or(0)),
+    ))
 }
 
 pub fn parse_response(html: &str) -> Result<Vec<RawResult>, EngineError> {
@@ -248,80 +260,59 @@ mod test {
     use super::*;
 
     #[test]
-    fn extract_vqd_reads_the_hidden_form_input() {
-        let html = r#"<input type="hidden" name="vqd" value="4-123abc">"#;
-
-        assert_eq!(extract_vqd(html), Some("4-123abc".to_owned()));
+    fn continuation_preserves_all_fields_and_skips_previous_page() {
+        let html = format!("{}{}", next_form(0, "old"), next_form(50, "new"));
+        let form = extract_next_form(&html, 30).unwrap();
+        assert_eq!(form_offset(&form), Some(50));
+        assert!(form.contains(&("vqd".into(), "new".into())));
+        assert!(form.contains(&("api".into(), "d.js".into())));
+        assert!(form.contains(&("nextParams".into(), "a&b".into())));
+        assert!(extract_next_form(&html, 50).is_none());
     }
 
     #[test]
-    fn extract_vqd_returns_none_when_absent() {
-        assert_eq!(extract_vqd(SEARCH_FIXTURE), None);
+    fn continuation_returns_none_when_absent() {
+        assert_eq!(extract_next_form(SEARCH_FIXTURE, 0), None);
     }
 
     #[test]
-    fn a_stored_vqd_is_returned_for_the_same_query() {
-        let query = "vqd-cache-same-query-008";
-        store_vqd(query, "4-same-query".to_owned(), RouteId::Direct);
-
-        assert_eq!(
-            cached_vqd(query),
-            Some(("4-same-query".to_owned(), RouteId::Direct))
-        );
-    }
-
-    #[test]
-    fn a_vqd_for_a_different_query_is_not_returned() {
-        store_vqd(
-            "vqd-cache-source-query-008",
-            "4-source-query".to_owned(),
-            RouteId::Direct,
-        );
-
-        assert_eq!(cached_vqd("vqd-cache-different-query-008"), None);
+    fn continuation_is_scoped_to_query_and_raw_offset() {
+        let query = "continuation-cache-query";
+        let form = extract_next_form(&next_form(30, "token"), 0);
+        store_continuation(query, 19, form.clone(), RouteId::Direct);
+        let cached = cached_continuation(query, 19).unwrap();
+        assert_eq!(cached.form, form);
+        assert_eq!(cached.route, RouteId::Direct);
+        assert!(cached_continuation(query, 20).is_none());
+        assert!(cached_continuation("another-query", 19).is_none());
     }
 
     #[test]
     fn build_form_omits_pagination_fields_on_first_page() {
-        let form = build_form("rust async", 0, None);
+        let form = build_form("rust async");
 
         assert_eq!(
             form,
             vec![
-                ("q", "rust async".to_owned()),
-                ("b", String::new()),
-                ("kl", "wt-wt".to_owned()),
-            ]
-        );
-    }
-
-    #[test]
-    fn build_form_adds_pagination_fields_for_later_pages() {
-        assert_eq!(
-            build_form("rust async", 20, Some("4-123abc")),
-            vec![
-                ("q", "rust async".to_owned()),
-                ("b", String::new()),
-                ("kl", "wt-wt".to_owned()),
-                ("s", "20".to_owned()),
-                ("dc", "21".to_owned()),
-                ("vqd", "4-123abc".to_owned()),
+                ("q".into(), "rust async".to_owned()),
+                ("b".into(), String::new()),
+                ("kl".into(), "wt-wt".to_owned()),
             ]
         );
     }
 
     #[test]
     fn build_form_carries_reserved_characters_verbatim() {
-        let form = build_form("AT&T c++ #tag", 0, None);
+        let form = build_form("AT&T c++ #tag");
 
-        assert_eq!(form[0], ("q", "AT&T c++ #tag".to_owned()));
+        assert_eq!(form[0], ("q".into(), "AT&T c++ #tag".to_owned()));
     }
 
     #[test]
     fn build_form_carries_non_ascii_query_verbatim() {
-        let form = build_form("café 日本語", 0, None);
+        let form = build_form("café 日本語");
 
-        assert_eq!(form[0], ("q", "café 日本語".to_owned()));
+        assert_eq!(form[0], ("q".into(), "café 日本語".to_owned()));
     }
 
     #[test]
@@ -445,16 +436,93 @@ mod test {
     }
 
     #[tokio::test]
-    async fn paginating_without_a_vqd_refuses_to_send_a_request() {
+    async fn missing_continuation_is_not_an_engine_block() {
         let result = search_results_at("http://127.0.0.1:1/", "no-vqd-pagination-008", 20).await;
 
+        assert!(matches!(result, Err(EngineError::PaginationExpired(_))));
+    }
+
+    fn next_form(offset: usize, token: &str) -> String {
+        format!(
+            r#"<form method="post">
+            <input type="hidden" name="q" value="paging-test">
+            <input type="hidden" name="s" value="{offset}">
+            <input type="hidden" name="vqd" value="{token}">
+            <input type="hidden" name="api" value="d.js">
+            <input type="hidden" name="nextParams" value="a&amp;b">
+        </form>"#
+        )
+    }
+
+    #[tokio::test]
+    async fn pagination_replays_forms_rotates_tokens_and_keeps_state_after_failure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, form) in [
+                (200, next_form(30, "first")),
+                (500, String::new()),
+                (200, next_form(50, "second")),
+                (200, String::new()),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    let length = stream.read(&mut chunk).await.unwrap();
+                    assert!(length > 0);
+                    request.extend_from_slice(&chunk[..length]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            requests.push(String::from_utf8(request[end + 4..].to_vec()).unwrap());
+                            break;
+                        }
+                    }
+                }
+                let body = format!("{SEARCH_FIXTURE}{form}");
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let base = format!("http://{address}/");
+        let query = "paging-test";
+        assert_eq!(search_results_at(&base, query, 0).await.unwrap().len(), 1);
         assert!(matches!(
-            result,
-            Err(EngineError::Blocked {
-                kind: BlockKind::Captcha,
-                ..
-            })
+            search_results_at(&base, query, 1).await,
+            Err(EngineError::Blocked { .. })
         ));
+        assert_eq!(search_results_at(&base, query, 1).await.unwrap().len(), 1);
+        assert_eq!(search_results_at(&base, query, 2).await.unwrap().len(), 1);
+        assert!(search_results_at(&base, query, 3).await.unwrap().is_empty());
+        let requests = server.await.unwrap();
+        assert_eq!(requests[1], requests[2]);
+        for (body, offset, token) in [
+            (&requests[1], "30", "first"),
+            (&requests[3], "50", "second"),
+        ] {
+            let url = Url::parse(&format!("http://localhost/?{body}")).unwrap();
+            let fields: HashMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(fields["s"], offset);
+            assert_eq!(fields["vqd"], token);
+            assert_eq!(fields["api"], "d.js");
+            assert_eq!(fields["nextParams"], "a&b");
+        }
     }
 
     // DDG bot-walls datacenter IPs with an "anomaly" page; retry from a

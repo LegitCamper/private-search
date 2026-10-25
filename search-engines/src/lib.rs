@@ -72,6 +72,7 @@ impl std::fmt::Display for BlockKind {
 pub enum EngineError {
     ReqwestError(reqwest::Error),
     ParseError(String),
+    PaginationExpired(String),
     Timeout, // engine timeout
     // A captcha or rate limit calls for backoff, while a missing results
     // marker on a healthy 200 means our selectors are stale and need a code
@@ -88,6 +89,7 @@ impl std::fmt::Display for EngineError {
         match self {
             EngineError::ReqwestError(e) => write!(f, "request failed: {e}"),
             EngineError::ParseError(e) => write!(f, "parse error: {e}"),
+            EngineError::PaginationExpired(e) => write!(f, "pagination expired: {e}"),
             EngineError::Timeout => write!(f, "engine timed out"),
             EngineError::Blocked {
                 kind,
@@ -113,8 +115,13 @@ pub trait EngineInfo: Clone + Send {
 
 #[async_trait]
 pub trait SearchEngine: EngineInfo + Clone + Send {
-    /// Fetches one page of results. `start` is how many the caller already
-    /// has; `count` is a hint some engines can't honor exactly. An empty
+    /// Advances the upstream cursor; page-based engines override the raw-count default.
+    fn next_start(&self, start: usize, result_count: usize) -> usize {
+        start.saturating_add(result_count)
+    }
+
+    /// Fetches one page of results. `start` is the cursor from `next_start`;
+    /// `count` is a hint some engines can't honor exactly. An empty
     /// `Vec` signals no more results.
     async fn search_results(
         &self,
