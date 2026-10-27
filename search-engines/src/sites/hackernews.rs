@@ -199,6 +199,12 @@ pub fn parse_response(json: &str) -> Result<Vec<RawResult>, EngineError> {
 
 #[async_trait]
 impl SearchEngine for HackerNews {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(HN_HITS_PER_PAGE)
+    }
+
     /// `count` is ignored: the page size is pinned to [`HN_HITS_PER_PAGE`] so
     /// that `start` maps cleanly onto Algolia's fixed-size pages.
     async fn search_results(

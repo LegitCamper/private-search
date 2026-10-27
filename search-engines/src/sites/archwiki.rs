@@ -174,6 +174,12 @@ fn parse_response(json: &str) -> Result<Vec<RawResult>, EngineError> {
 
 #[async_trait]
 impl SearchEngine for ArchWiki {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(RESULTS_PER_PAGE)
+    }
+
     /// `count` is ignored: the wiki pages by a fixed `srlimit` and the cache
     /// layer only needs "one more page from this engine".
     async fn search_results(

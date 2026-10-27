@@ -86,6 +86,7 @@ pub trait EngineSource<R: CacheableRow>: Send + Sync {
     async fn wait_ready(&self) -> Result<(), String> {
         Ok(())
     }
+    fn record_outcome(&self, _started: std::time::Instant, _outcome: &EngineOutcome) {}
     async fn fetch_page(&self, query: &str, start: usize) -> Result<Vec<R>, EngineOutcome>;
 }
 
@@ -142,6 +143,10 @@ pub struct PositionedRow<R> {
 pub enum EngineOutcome {
     Ok,
     Failed(String),
+    Blocked {
+        message: String,
+        retry_after: Duration,
+    },
     TimedOut,
     /// Not an upstream failure; preserve progress without starting a cooldown.
     Deferred(String),
@@ -207,9 +212,9 @@ pub enum CacheEvent<R> {
 }
 
 /// A [`CacheEvent`] tagged with its position in a build's global event
-/// history. A live build can resume exactly after `after_sequence`; once its
-/// in-memory history is gone, persisted rows may be replayed under newer IDs
-/// and consumers deduplicate them by URL/position.
+/// history. Sequence ids are rebased per subscriber above its
+/// `after_sequence` cursor, so replayed rows arrive under new ids and
+/// consumers deduplicate them by URL/position.
 #[derive(Debug, Clone)]
 pub struct SequencedCacheEvent<R> {
     pub sequence: u64,
@@ -217,7 +222,7 @@ pub struct SequencedCacheEvent<R> {
 }
 
 /// The result of [`MergedCache::subscribe_or_extend`]: an already-available
-/// snapshot (replayed history, filtered to the caller's window) plus a live
+/// snapshot (replayed history for the caller's window) plus a live
 /// channel for whatever hasn't happened yet. Both halves carry the exact same
 /// event type, so a caller can just drain `snapshot` then read `live` without
 /// caring which events were replay and which were newly produced.
@@ -302,6 +307,7 @@ fn transform_for_subscriber<R: Clone>(
 struct Subscriber<R> {
     start: usize,
     count: usize,
+    sequence_offset: u64,
     sender: mpsc::UnboundedSender<SequencedCacheEvent<R>>,
 }
 
@@ -390,9 +396,9 @@ impl<R: CacheableRow> Build<R> {
         notified.await;
     }
 
-    /// Snapshot + subscribe under one lock: replays history after
-    /// `after_sequence` (filtered to `[start, start+count)`), then registers
-    /// a live sender, all before releasing the lock — so no event emitted
+    /// Snapshot + subscribe under one lock: replays the history relevant to
+    /// `[start, start+count)` with sequence ids rebased above
+    /// `after_sequence`, then registers a live sender, all before releasing the lock — so no event emitted
     /// concurrently with this call can land in the gap between "read
     /// history" and "start listening".
     async fn subscribe(
@@ -403,13 +409,13 @@ impl<R: CacheableRow> Build<R> {
         is_owner: bool,
     ) -> CacheSubscription<R> {
         let mut inner = self.inner.lock().await;
+        let sequence_offset = after_sequence.map_or(0, |after| after.saturating_add(1));
         let snapshot = inner
             .history
             .iter()
-            .filter(|e| after_sequence.is_none_or(|after| e.sequence > after))
             .filter_map(|e| {
                 transform_for_subscriber(&e.event, start, count).map(|event| SequencedCacheEvent {
-                    sequence: e.sequence,
+                    sequence: e.sequence.saturating_add(sequence_offset),
                     event,
                 })
             })
@@ -418,6 +424,7 @@ impl<R: CacheableRow> Build<R> {
         inner.subscribers.push(Subscriber {
             start,
             count,
+            sequence_offset,
             sender,
         });
         CacheSubscription {
@@ -439,7 +446,7 @@ impl<R: CacheableRow> Build<R> {
                 Some(transformed) => sub
                     .sender
                     .send(SequencedCacheEvent {
-                        sequence,
+                        sequence: sequence.saturating_add(sub.sequence_offset),
                         event: transformed,
                     })
                     .is_ok(),
@@ -447,6 +454,21 @@ impl<R: CacheableRow> Build<R> {
             }
         });
         inner.history.push(SequencedCacheEvent { sequence, event });
+    }
+
+    async fn has_subscribers(&self) -> bool {
+        self.inner
+            .lock()
+            .await
+            .subscribers
+            .iter()
+            .any(|subscriber| !subscriber.sender.is_closed())
+    }
+
+    async fn disconnected(&self) {
+        while self.has_subscribers().await {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
 
@@ -511,8 +533,7 @@ async fn finalize_canonical<R: CacheableRow>(
 /// requested window is covered or every source is exhausted/benched, then
 /// publishes a fresh canonical order over the complete member set. Runs
 /// detached from any particular subscriber/caller — it owns only cloned,
-/// `'static` state, so it keeps going even if every subscriber (including
-/// the original caller) disconnects, and it outlives the `MergedCache<R>`
+/// `'static` state, and it outlives the `MergedCache<R>`
 /// instance's own borrow scope (important since tests construct one as a
 /// plain local variable, not a `'static` global).
 struct RunBuildParams<R: CacheableRow> {
@@ -772,6 +793,9 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
     let mut failed_this_call: HashSet<&'static str> = HashSet::new();
 
     for round in 0..MAX_ROUNDS {
+        if !build.has_subscribers().await {
+            break;
+        }
         if build.finish_if_satisfied(state.position as usize) {
             break;
         }
@@ -791,14 +815,24 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
             let q = query.clone();
             let start_for_src = state.next_start[src.name()] as usize;
             set.spawn(async move {
+                let started;
                 let outcome = match src.wait_ready().await {
-                    Ok(()) => match timeout(round_timeout, src.fetch_page(&q, start_for_src)).await
-                    {
-                        Ok(result) => result,
-                        Err(_) => Err(EngineOutcome::TimedOut),
-                    },
-                    Err(message) => Err(EngineOutcome::Deferred(message)),
+                    Ok(()) => {
+                        started = std::time::Instant::now();
+                        match timeout(round_timeout, src.fetch_page(&q, start_for_src)).await {
+                            Ok(result) => result,
+                            Err(_) => Err(EngineOutcome::TimedOut),
+                        }
+                    }
+                    Err(message) => {
+                        started = std::time::Instant::now();
+                        Err(EngineOutcome::Deferred(message))
+                    }
                 };
+                src.record_outcome(
+                    started,
+                    outcome.as_ref().err().unwrap_or(&EngineOutcome::Ok),
+                );
                 let next_start = outcome.as_ref().map_or(start_for_src, |rows| {
                     src.next_start(start_for_src, rows.len())
                 });
@@ -829,6 +863,11 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                     tokio::select! {
                         biased;
                         joined = set.join_next() => joined,
+                        _ = build.disconnected() => {
+                            build.stop_accepting_subscribers();
+                            set.abort_all();
+                            None
+                        }
                         _ = sleep_until(dl) => {
                             holding = false;
                             let taken = std::mem::take(&mut buffered);
@@ -862,7 +901,14 @@ async fn run_build<R: CacheableRow>(params: RunBuildParams<R>) {
                         }
                     }
                 }
-                _ => set.join_next().await,
+                _ => tokio::select! {
+                    joined = set.join_next() => joined,
+                    _ = build.disconnected() => {
+                        build.stop_accepting_subscribers();
+                        set.abort_all();
+                        None
+                    }
+                },
             };
 
             let Some(joined) = joined else {
@@ -1203,13 +1249,12 @@ impl<R: CacheableRow> MergedCache<R> {
     /// covered or every source is exhausted/benched, at which point a new
     /// canonical order is ranked and published. A compatible concurrent
     /// request (same query, same base order) joins that same build rather
-    /// than starting a second one, and the build itself keeps running to
-    /// completion even if every subscriber disconnects.
+    /// than starting a second one. A build whose every subscriber has gone
+    /// away is aborted rather than run to completion.
     ///
-    /// `after_sequence` resumes a still-live build after a given sequence. If
-    /// that build already finished, the persisted window is replayed with new
-    /// sequence IDs above the supplied cursor; consumers must deduplicate rows
-    /// by URL/position, as the browser client does.
+    /// `after_sequence` is a floor, not an exact filter: the relevant history
+    /// is replayed with sequence ids rebased above it, so consumers must
+    /// deduplicate rows by URL/position, as the browser client does.
     #[allow(clippy::too_many_arguments)]
     pub async fn subscribe_or_extend(
         &self,
@@ -1301,6 +1346,7 @@ impl<R: CacheableRow> MergedCache<R> {
                 }
             };
 
+            db::reconcile_order(&self.pool, query_id, target_order_id).await?;
             let build = Build::<R>::new(target_order_id, base_order_id, needed_end);
             builds.insert(query_id, build.clone());
             // Subscribe before releasing the registry lock and before spawning
@@ -1597,6 +1643,64 @@ mod test {
             self.gate.notified().await;
             Ok(self.page.clone())
         }
+    }
+
+    /// A source that reports its settlement through a channel, so a test can
+    /// observe when `record_outcome` runs relative to other sources.
+    struct ReportingSource {
+        name: &'static str,
+        page: Vec<TestRow>,
+        settled: tokio::sync::mpsc::UnboundedSender<&'static str>,
+    }
+
+    #[async_trait]
+    impl EngineSource<TestRow> for ReportingSource {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn record_outcome(&self, _started: std::time::Instant, _outcome: &EngineOutcome) {
+            let _ = self.settled.send(self.name);
+        }
+
+        async fn fetch_page(
+            &self,
+            _query: &str,
+            _start: usize,
+        ) -> Result<Vec<TestRow>, EngineOutcome> {
+            Ok(self.page.clone())
+        }
+    }
+
+    /// Health feedback has to land as each source settles: waiting for the
+    /// whole round would leave a blocked engine looking healthy for as long
+    /// as the slowest sibling takes.
+    #[tokio::test]
+    async fn record_outcome_runs_before_a_slower_source_settles() {
+        let cache = test_cache().await;
+        let (tx, mut settled) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let fast: Arc<dyn EngineSource<TestRow>> = Arc::new(ReportingSource {
+            name: "Fast",
+            page: vec![row("https://fast.example/1")],
+            settled: tx,
+        });
+        let slow: Arc<dyn EngineSource<TestRow>> =
+            GatedSource::new("Slow", gate.clone(), vec![row("https://slow.example/1")]);
+
+        let sources = vec![fast, slow];
+        let search = cache.get_or_extend("settle order", &sources, 0, 2, Duration::from_secs(5));
+        let watch = async {
+            assert_eq!(
+                settled.recv().await,
+                Some("Fast"),
+                "the fast source must report health before the slow one finishes"
+            );
+            gate.notify_waiters();
+        };
+
+        let (result, ()) = tokio::join!(search, watch);
+        assert_eq!(result.unwrap().rows.len(), 2);
     }
 
     /// An isolated in-memory pool per test — deliberately avoids `db::init`'s
@@ -3111,6 +3215,265 @@ mod test {
             resumed.snapshot.last().map(|event| &event.event),
             Some(CacheEvent::Done { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn replacement_build_rebases_every_subscribers_sequence() {
+        let cache = test_cache().await;
+        let events = drain_all(
+            cache
+                .subscribe_or_extend(
+                    "replacement",
+                    one_source(ScriptedSource::new("A", vec![vec![row("a")]])),
+                    0,
+                    2,
+                    None,
+                    Duration::from_secs(1),
+                    None,
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let token = events
+            .iter()
+            .find_map(|event| match event.event {
+                CacheEvent::Metadata { order_id, .. } => Some(order_id),
+                _ => None,
+            })
+            .unwrap();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let source = GatedSource::new("B", gate.clone(), vec![row("b")]);
+        let first = cache
+            .subscribe_or_extend(
+                "replacement",
+                one_source(source),
+                0,
+                2,
+                Some(token),
+                Duration::from_secs(2),
+                Some(100),
+            )
+            .await
+            .unwrap();
+        let second = cache
+            .subscribe_or_extend(
+                "replacement",
+                vec![],
+                0,
+                2,
+                Some(token),
+                Duration::from_secs(2),
+                Some(200),
+            )
+            .await
+            .unwrap();
+        gate.notify_one();
+        for (events, cursor) in [
+            (drain_all(first).await, 100),
+            (drain_all(second).await, 200),
+        ] {
+            assert!(events.iter().all(|event| event.sequence > cursor));
+            assert!(events.iter().any(|event| matches!(&event.event, CacheEvent::Results(rows) if rows.iter().any(|entry| entry.row.value.url == "b"))));
+            assert!(matches!(
+                events.last().unwrap().event,
+                CacheEvent::Done { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn old_order_collects_intervening_members_without_refetching() {
+        let cache = test_cache().await;
+        let events = drain_all(
+            cache
+                .subscribe_or_extend(
+                    "older order",
+                    one_source(ScriptedSource::new("A", vec![vec![row("a")]])),
+                    0,
+                    1,
+                    None,
+                    Duration::from_secs(1),
+                    None,
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let token = events
+            .iter()
+            .find_map(|event| match event.event {
+                CacheEvent::Done { active_order, .. } => Some(active_order),
+                _ => None,
+            })
+            .unwrap();
+        let source = ScriptedSource::new("A", vec![vec![row("b"), row("c")], vec![]]);
+        cache
+            .get_or_extend(
+                "older order",
+                &one_source(source.clone()),
+                0,
+                4,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        let calls = source.calls.load(Ordering::SeqCst);
+        let events = drain_all(
+            cache
+                .subscribe_or_extend(
+                    "older order",
+                    one_source(source.clone()),
+                    1,
+                    2,
+                    Some(token),
+                    Duration::from_secs(1),
+                    None,
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let urls: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                CacheEvent::Results(rows) => {
+                    Some(rows.iter().map(|entry| entry.row.value.url.as_str()))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(urls, ["b", "c"]);
+        assert_eq!(source.calls.load(Ordering::SeqCst), calls);
+    }
+
+    #[tokio::test]
+    async fn payloads_are_isolated_by_query_and_namespace() {
+        let cache = test_cache().await;
+        let now = chrono::Utc::now().naive_utc();
+        let mut tx = cache.pool.begin().await.unwrap();
+        let text = db::get_or_create_namespace(&mut tx, "text").await.unwrap();
+        let images = db::get_or_create_namespace(&mut tx, "images")
+            .await
+            .unwrap();
+        let first = db::get_or_create_query(&mut tx, "first", text, now)
+            .await
+            .unwrap();
+        let second = db::get_or_create_query(&mut tx, "second", text, now)
+            .await
+            .unwrap();
+        let image = db::get_or_create_query(&mut tx, "first", images, now)
+            .await
+            .unwrap();
+        let url = "https://example.com/same";
+        let image_id = db::get_or_create_row(&mut tx, image, url, &serde_json::json!({"url": url}))
+            .await
+            .unwrap();
+        let first_id = db::get_or_create_row(
+            &mut tx,
+            first,
+            url,
+            &serde_json::json!({"url": url, "title": "first"}),
+        )
+        .await
+        .unwrap();
+        let second_id = db::get_or_create_row(
+            &mut tx,
+            second,
+            url,
+            &serde_json::json!({"url": url, "title": "second"}),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        assert_ne!(image_id, first_id);
+        assert_ne!(first_id, second_id);
+        let payload: String = sqlx::query_scalar("SELECT payload FROM rows WHERE id = ?")
+            .bind(second_id)
+            .fetch_one(&cache.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<TestRow>(&payload).unwrap().title,
+            "second"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_wal_requests_do_not_promote_stale_read_transactions() {
+        let path = std::env::temp_dir().join(format!(
+            "search-wal-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true)
+                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                    .busy_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        db::create_schema(&pool).await.unwrap();
+        let cache = Arc::new(MergedCache::new(
+            pool.clone(),
+            "concurrent",
+            Arc::new(NoopRanker),
+        ));
+        let mut tasks = JoinSet::new();
+        for index in 0..24 {
+            let cache = cache.clone();
+            tasks.spawn(async move {
+                cache
+                    .get_or_extend(&format!("query-{index}"), &[], 0, 1, Duration::from_secs(1))
+                    .await
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap().unwrap();
+        }
+        pool.close().await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn abandoned_build_cancels_pending_sources() {
+        let cache = test_cache().await;
+        let source = GatedSource::new(
+            "Never",
+            Arc::new(tokio::sync::Notify::new()),
+            vec![row("unused")],
+        );
+        let subscription = cache
+            .subscribe_or_extend(
+                "abandoned",
+                one_source(source),
+                0,
+                1,
+                None,
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+            .unwrap();
+        drop(subscription);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if cache.builds.lock().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("abandoned build must not wait for upstream timeout");
     }
 
     #[tokio::test]

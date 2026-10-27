@@ -22,10 +22,12 @@ mod brave;
 mod duckduckgo;
 pub mod proxy;
 pub mod sites;
+mod wiby;
 
 pub use brave::Brave;
 pub use duckduckgo::DuckDuckGo;
 pub use sites::*;
+pub use wiby::Wiby;
 
 /// One raw text-search hit, straight off an engine's results page — no
 /// ranking, dedup, or engine attribution applied yet.
@@ -84,10 +86,34 @@ pub enum EngineError {
     },
 }
 
+/// `reqwest`'s own `Display` embeds the full request URL, which for these
+/// engines contains the user's search terms — and engine errors are logged,
+/// surfaced to the browser, and outlive the cache's retention window. Only the
+/// error class is kept.
+fn redact(e: &reqwest::Error) -> String {
+    let kind = if e.is_timeout() {
+        "timed out"
+    } else if e.is_connect() {
+        "connection failed"
+    } else if e.is_body() || e.is_decode() {
+        "malformed response body"
+    } else if e.is_redirect() {
+        "too many redirects"
+    } else if e.is_builder() {
+        "invalid request"
+    } else {
+        "failed"
+    };
+    match e.status() {
+        Some(status) => format!("{kind} (HTTP {})", status.as_u16()),
+        None => kind.to_owned(),
+    }
+}
+
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EngineError::ReqwestError(e) => write!(f, "request failed: {e}"),
+            EngineError::ReqwestError(e) => write!(f, "request {}", redact(e)),
             EngineError::ParseError(e) => write!(f, "parse error: {e}"),
             EngineError::PaginationExpired(e) => write!(f, "pagination expired: {e}"),
             EngineError::Timeout => write!(f, "engine timed out"),
@@ -115,9 +141,27 @@ pub trait EngineInfo: Clone + Send {
 
 #[async_trait]
 pub trait SearchEngine: EngineInfo + Clone + Send {
-    /// Advances the upstream cursor; page-based engines override the raw-count default.
+    /// The fixed upstream page size, for every engine whose cursor is a page
+    /// (or whole-page offset) rather than a count of rows we happened to keep.
+    /// Declaring it is what keeps pagination alive: an engine that returns 20
+    /// rows of which we drop one would otherwise be advanced to offset 19,
+    /// which maps back onto the *same* page, whose rows are all already known
+    /// — and a round that yields nothing new marks the engine exhausted.
+    /// `None` means the cursor really is a raw result offset.
+    fn page_size(&self) -> Option<usize> {
+        None
+    }
+
+    /// Advances the upstream cursor: to the next whole page for page-based
+    /// engines (see [`SearchEngine::page_size`]), otherwise past the rows just
+    /// returned.
     fn next_start(&self, start: usize, result_count: usize) -> usize {
-        start.saturating_add(result_count)
+        match self.page_size() {
+            Some(per_page) if per_page > 0 => (start / per_page)
+                .saturating_add(1)
+                .saturating_mul(per_page),
+            _ => start.saturating_add(result_count),
+        }
     }
 
     /// Fetches one page of results. `start` is the cursor from `next_start`;
@@ -212,15 +256,29 @@ fn classify_status(
     status: u16,
     retry_after: Option<&str>,
 ) -> Option<(BlockKind, Option<Duration>)> {
-    let retry_after = retry_after
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs);
+    let retry_after =
+        retry_after.and_then(|value| parse_retry_after(value, std::time::SystemTime::now()));
 
     match status {
         402 | 429 => Some((BlockKind::RateLimited, retry_after)),
-        403 => Some((BlockKind::AccessDenied, None)),
-        500..=599 => Some((BlockKind::ServerError, None)),
+        403 => Some((BlockKind::AccessDenied, retry_after)),
+        500..=599 => Some((BlockKind::ServerError, retry_after)),
         _ => None,
+    }
+}
+
+fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        let duration = Duration::from_secs(seconds);
+        now.checked_add(duration)?;
+        Some(duration)
+    } else {
+        Some(
+            httpdate::parse_http_date(value)
+                .ok()?
+                .duration_since(now)
+                .unwrap_or_default(),
+        )
     }
 }
 
@@ -385,6 +443,112 @@ mod test {
     use super::*;
 
     #[test]
+    fn retry_after_supports_http_dates_and_server_errors() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_445_412_420);
+        assert_eq!(
+            parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT", now),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(parse_retry_after("invalid", now), None);
+        assert_eq!(
+            classify_status(503, Some("180")),
+            Some((BlockKind::ServerError, Some(Duration::from_secs(180))))
+        );
+    }
+
+    #[derive(Clone)]
+    struct Paged(usize);
+
+    impl EngineInfo for Paged {
+        fn name(&self) -> &'static str {
+            "Paged"
+        }
+    }
+
+    #[async_trait]
+    impl SearchEngine for Paged {
+        fn page_size(&self) -> Option<usize> {
+            Some(self.0)
+        }
+
+        async fn search_results(
+            &self,
+            _query: &str,
+            _start: usize,
+            _count: usize,
+        ) -> Result<Vec<RawResult>, EngineError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone)]
+    struct Offset;
+
+    impl EngineInfo for Offset {
+        fn name(&self) -> &'static str {
+            "Offset"
+        }
+    }
+
+    #[async_trait]
+    impl SearchEngine for Offset {
+        async fn search_results(
+            &self,
+            _query: &str,
+            _start: usize,
+            _count: usize,
+        ) -> Result<Vec<RawResult>, EngineError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn a_page_based_cursor_advances_a_whole_page_even_when_rows_were_filtered() {
+        // 20 upstream rows, one dropped by the adapter's own filtering: the
+        // old raw-count default produced 19, which maps back onto page 1 and
+        // makes the engine look exhausted on page 2.
+        assert_eq!(Paged(20).next_start(0, 19), 20);
+        assert_eq!(Paged(20).next_start(0, 0), 20);
+        assert_eq!(Paged(20).next_start(20, 20), 40);
+        // A cursor mid-page still advances past the page it sits on.
+        assert_eq!(Paged(20).next_start(25, 20), 40);
+    }
+
+    #[test]
+    fn a_zero_page_size_cannot_divide_by_zero() {
+        assert_eq!(Paged(0).next_start(10, 5), 15);
+    }
+
+    #[test]
+    fn an_offset_based_cursor_still_advances_by_the_rows_returned() {
+        assert_eq!(Offset.next_start(0, 19), 19);
+        assert_eq!(Offset.next_start(19, 20), 39);
+    }
+
+    #[tokio::test]
+    async fn a_request_error_never_leaks_the_query_it_came_from() {
+        // A URL that cannot connect, carrying the "query" in its path.
+        let error = base_builder()
+            .timeout(Duration::from_millis(1))
+            .build()
+            .unwrap()
+            .get(format!(
+                "http://{}:1/search?q=my-secret-query",
+                std::net::Ipv4Addr::LOCALHOST
+            ))
+            .send()
+            .await
+            .expect_err("a request to a closed port must fail");
+
+        let rendered = EngineError::ReqwestError(error).to_string();
+        assert!(
+            !rendered.contains("my-secret-query"),
+            "engine errors are logged and shown to users: {rendered}"
+        );
+        assert!(rendered.starts_with("request "), "got {rendered}");
+    }
+
+    #[test]
     fn classify_status_maps_429_to_rate_limited() {
         assert_eq!(
             classify_status(429, None),
@@ -404,7 +568,7 @@ mod test {
     fn classify_status_maps_403_to_access_denied() {
         assert_eq!(
             classify_status(403, Some("120")),
-            Some((BlockKind::AccessDenied, None))
+            Some((BlockKind::AccessDenied, Some(Duration::from_secs(120))))
         );
     }
 

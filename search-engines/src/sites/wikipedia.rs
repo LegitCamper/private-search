@@ -300,6 +300,12 @@ fn to_results(response: Response) -> Result<Vec<RawResult>, EngineError> {
 
 #[async_trait]
 impl SearchEngine for Wikipedia {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(PER_PAGE)
+    }
+
     async fn search_results(
         &self,
         query: &str,

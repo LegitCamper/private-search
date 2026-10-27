@@ -71,6 +71,21 @@ export function retryDelayMs(status, consecutiveFailures) {
   return Math.min(30000, base * (2 ** exponent));
 }
 
+// Whether a non-OK HTTP status can plausibly succeed if the exact same request
+// is repeated. A 400 (expired/unknown order token) cannot: retrying it with
+// the same token is guaranteed to fail again.
+export function isRetryableStatus(status) {
+  // 0 is this client's own marker for a transport-level failure.
+  return status === 0 || status === 408 || status === 429 || status >= 500;
+}
+
+export function retryAfterMs(value, now = Date.now()) {
+  if (typeof value !== "string" || !value.trim()) return 0;
+  const seconds = /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN;
+  const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now;
+  return Number.isFinite(delay) ? Math.max(0, delay) : 0;
+}
+
 // True once the end-of-results marker has come within `margin` px of the
 // bottom of the viewport, so the next page starts loading slightly before the
 // user actually reaches the end of the list. `sentinelTop` is the marker's
@@ -472,6 +487,9 @@ export class StreamStateReducer {
     this.actions.push({
       type: "error",
       message: this.error,
+      retryable: data?.retryable !== false,
+      retryAfterMs: Number.isFinite(data?.retryAfterMs) && data.retryAfterMs > 0
+        ? data.retryAfterMs : 0,
     });
   }
 

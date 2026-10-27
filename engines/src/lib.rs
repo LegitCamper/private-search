@@ -33,7 +33,7 @@ use search_cache::{
 use search_engines::{
     ArchWiki, Brave, Codeberg, CratesIo, DockerHub, DuckDuckGo, EngineInfo, GitHub, GitLab, GoPkg,
     HackerNews, HexPm, ImageEngine, Lobsters, MavenCentral, Mdn, NixPackages, Npm, NuGet,
-    Packagist, PyPi, RubyGems, SearchEngine, StackExchange, Wikipedia,
+    Packagist, PyPi, RubyGems, SearchEngine, StackExchange, Wiby, Wikipedia,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -62,6 +62,7 @@ const ENGINE_PAGE_HINT: usize = 20;
 struct CooldownState {
     consecutive_failures: u32,
     cooling_until: Option<Instant>,
+    failed_at: Instant,
 }
 
 static COOLDOWNS: OnceLock<StdMutex<HashMap<&'static str, CooldownState>>> = OnceLock::new();
@@ -116,16 +117,22 @@ fn cooldown_remaining(engine: &'static str) -> Option<Duration> {
 /// additional consecutive failure, capped at `cooldown_cap()`. A no-op if
 /// cooldowns are disabled (`cooldown_base()` is zero).
 fn record_failure(engine: &'static str) {
+    record_failure_with_retry(engine, Duration::ZERO);
+}
+
+fn record_failure_with_retry(engine: &'static str, retry_after: Duration) {
     let base = cooldown_base();
-    if base.is_zero() {
+    if base.is_zero() && retry_after.is_zero() {
         return;
     }
     let mut map = cooldowns().lock().unwrap();
     let state = map.entry(engine).or_insert(CooldownState {
         consecutive_failures: 0,
         cooling_until: None,
+        failed_at: Instant::now(),
     });
-    state.consecutive_failures += 1;
+    state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+    state.failed_at = Instant::now();
     // Shift amount is capped well below 64 so this can't overflow even if a
     // test (or a very long-running process) drives the failure count high;
     // `saturating_mul` below then caps the resulting duration long before it
@@ -135,12 +142,14 @@ fn record_failure(engine: &'static str) {
     let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
     let backoff =
         Duration::from_secs(base.as_secs().saturating_mul(multiplier)).min(cooldown_cap());
-    state.cooling_until = Some(Instant::now() + backoff);
+    let deadline = Instant::now().checked_add(backoff.max(retry_after));
+    state.cooling_until = state.cooling_until.max(deadline);
 }
 
 /// Clears any cooldown/failure-count for `engine` — called on an `Ok`
 /// outcome so a subsequently-healthy engine isn't left cooling down from an
 /// earlier, now-irrelevant, streak of failures.
+#[cfg(test)]
 fn record_success(engine: &'static str) {
     cooldowns().lock().unwrap().remove(engine);
 }
@@ -148,17 +157,29 @@ fn record_success(engine: &'static str) {
 async fn wait_for_engine(engine: &'static str) -> Result<(), String> {
     static BRAVE: OnceLock<tokio::sync::Mutex<tokio::time::Instant>> = OnceLock::new();
     static DUCKDUCKGO: OnceLock<tokio::sync::Mutex<tokio::time::Instant>> = OnceLock::new();
+    static WIBY: OnceLock<tokio::sync::Mutex<tokio::time::Instant>> = OnceLock::new();
+    if let Some(remaining) = cooldown_remaining(engine) {
+        return Err(format!(
+            "retry in {}s",
+            remaining.as_secs().saturating_add(1)
+        ));
+    }
     let gate = match engine {
         "Brave" => &BRAVE,
         "DuckDuckGo" => &DUCKDUCKGO,
+        "Wiby" => &WIBY,
         _ => return Ok(()),
     };
-    reserve_engine_slot(
-        gate.get_or_init(|| tokio::sync::Mutex::new(tokio::time::Instant::now())),
-        engine,
-        resolve_secs("ENGINE_REQUEST_INTERVAL_SECS", 3),
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        reserve_engine_slot(
+            gate.get_or_init(|| tokio::sync::Mutex::new(tokio::time::Instant::now())),
+            engine,
+            resolve_secs("ENGINE_REQUEST_INTERVAL_SECS", 3),
+        ),
     )
     .await
+    .unwrap_or_else(|_| Err("engine busy; retry in 5s".into()))
 }
 
 async fn reserve_engine_slot(
@@ -166,7 +187,9 @@ async fn reserve_engine_slot(
     engine: &'static str,
     interval: Duration,
 ) -> Result<(), String> {
-    let mut next_request = gate.lock().await;
+    let mut next_request = gate
+        .try_lock()
+        .map_err(|_| "engine busy; retry in 5s".to_owned())?;
     if let Some(remaining) = cooldown_remaining(engine) {
         return Err(format!("retry in {}s", remaining.as_secs()));
     }
@@ -334,6 +357,7 @@ impl From<&EngineOutcome> for EngineStatus {
             EngineOutcome::Ok => EngineStatus::Ok,
             EngineOutcome::TimedOut => EngineStatus::TimedOut,
             EngineOutcome::Failed(msg) => EngineStatus::Failed(msg.clone()),
+            EngineOutcome::Blocked { message, .. } => EngineStatus::Failed(message.clone()),
             EngineOutcome::Deferred(msg) => EngineStatus::CoolingDown(msg.clone()),
         }
     }
@@ -343,6 +367,8 @@ impl From<&EngineOutcome> for EngineStatus {
 pub struct EngineReport {
     pub engine: String,
     pub status: EngineStatus,
+    #[serde(rename = "retryAfterMs", skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 /// Results from a [`SearchBuilder`] or [`ImageSearchBuilder`] call, paired
@@ -419,6 +445,8 @@ pub struct StreamDone {
 #[derive(Debug, Clone, Serialize)]
 pub struct StreamErrorPayload {
     pub message: String,
+    #[serde(rename = "retryAfterMs", skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 /// One serializable event in a search stream. Serialized untagged: the wire
@@ -452,9 +480,9 @@ impl<T> StreamEvent<T> {
 /// A [`StreamEvent`] tagged with its position in the underlying cache
 /// build's sequence, when it has one. Cooling-down `engine` reports emitted
 /// before the cache subscription even starts have no cache sequence, so
-/// `sequence` is `None` for those; every cache-derived event preserves its
-/// exact cache sequence id unchanged, so `after_sequence` reconnect keeps
-/// working end to end.
+/// `sequence` is `None` for those; cache-derived events carry the cache's
+/// own id, which the cache rebases per subscriber above the supplied
+/// `after_sequence` cursor.
 #[derive(Debug, Clone)]
 pub struct SequencedStreamEvent<T> {
     pub sequence: Option<u64>,
@@ -652,8 +680,48 @@ struct TextSource<E> {
 fn source_error(error: search_engines::EngineError) -> EngineOutcome {
     match error {
         search_engines::EngineError::PaginationExpired(message) => EngineOutcome::Deferred(message),
+        error @ search_engines::EngineError::Blocked {
+            retry_after: Some(retry_after),
+            ..
+        } => EngineOutcome::Blocked {
+            message: error.to_string(),
+            retry_after,
+        },
         error => EngineOutcome::Failed(error.to_string()),
     }
+}
+
+fn record_source_outcome(engine: &'static str, started: Instant, outcome: &EngineOutcome) {
+    match outcome {
+        EngineOutcome::Ok => {
+            let mut states = cooldowns().lock().unwrap();
+            if states
+                .get(engine)
+                .is_some_and(|state| state.failed_at <= started)
+            {
+                states.remove(engine);
+            }
+        }
+        EngineOutcome::Blocked { retry_after, .. } => {
+            record_failure_with_retry(engine, *retry_after)
+        }
+        EngineOutcome::Failed(_) | EngineOutcome::TimedOut => record_failure(engine),
+        EngineOutcome::Deferred(_) => {}
+    }
+}
+
+fn retry_after_ms(engine: &str) -> Option<u64> {
+    let states = cooldowns().lock().unwrap();
+    let remaining = states
+        .get(engine)?
+        .cooling_until?
+        .checked_duration_since(Instant::now())?;
+    Some(
+        remaining
+            .as_millis()
+            .saturating_add(1)
+            .min(u64::MAX as u128) as u64,
+    )
 }
 
 #[async_trait]
@@ -671,6 +739,10 @@ where
 
     async fn wait_ready(&self) -> Result<(), String> {
         wait_for_engine(self.name()).await
+    }
+
+    fn record_outcome(&self, started: Instant, outcome: &EngineOutcome) {
+        record_source_outcome(self.name(), started, outcome);
     }
 
     async fn fetch_page(
@@ -710,6 +782,10 @@ where
         wait_for_engine(self.name()).await
     }
 
+    fn record_outcome(&self, started: Instant, outcome: &EngineOutcome) {
+        record_source_outcome(self.name(), started, outcome);
+    }
+
     async fn fetch_page(
         &self,
         query: &str,
@@ -734,6 +810,7 @@ where
 pub enum SearchEngines {
     Brave,
     DuckDuckGo,
+    Wiby,
     GitHub,
     GitLab,
     Codeberg,
@@ -762,6 +839,7 @@ impl SearchEngines {
         vec![
             Self::Brave,
             Self::DuckDuckGo,
+            Self::Wiby,
             Self::GitHub,
             Self::GitLab,
             Self::Codeberg,
@@ -789,6 +867,7 @@ impl SearchEngines {
         match self {
             Self::Brave => Brave.name(),
             Self::DuckDuckGo => DuckDuckGo.name(),
+            Self::Wiby => Wiby.name(),
             Self::GitHub => GitHub.name(),
             Self::GitLab => GitLab.name(),
             Self::Codeberg => Codeberg.name(),
@@ -821,6 +900,7 @@ impl SearchEngines {
         match self {
             Self::Brave => source!(Brave),
             Self::DuckDuckGo => source!(DuckDuckGo),
+            Self::Wiby => source!(Wiby),
             Self::GitHub => source!(GitHub),
             Self::GitLab => source!(GitLab),
             Self::Codeberg => source!(Codeberg),
@@ -865,6 +945,7 @@ impl SearchProfile {
             Self::General => vec![
                 SearchEngines::Brave,
                 SearchEngines::DuckDuckGo,
+                SearchEngines::Wiby,
                 SearchEngines::Wikipedia,
             ],
             Self::Tech => vec![SearchEngines::HackerNews, SearchEngines::Lobsters],
@@ -993,6 +1074,7 @@ fn partition_by_cooldown<E: Copy>(
 /// clears any cooldown, a failure/timeout starts or extends one. Only
 /// `usable` engines can have an outcome at all — a cooling engine was never
 /// contacted this call, so it has nothing to record.
+#[cfg(test)]
 fn record_outcomes<E: Copy>(
     usable: &[E],
     name_of: impl Fn(E) -> &'static str,
@@ -1004,6 +1086,9 @@ fn record_outcomes<E: Copy>(
             match outcome {
                 EngineOutcome::Ok => record_success(name),
                 EngineOutcome::Failed(_) | EngineOutcome::TimedOut => record_failure(name),
+                EngineOutcome::Blocked { retry_after, .. } => {
+                    record_failure_with_retry(name, *retry_after)
+                }
                 EngineOutcome::Deferred(_) => {}
             }
         }
@@ -1027,6 +1112,12 @@ fn build_reports<E: Copy + PartialEq>(
             if let Some((_, remaining)) = cooling.iter().find(|(ce, _)| *ce == e) {
                 EngineReport {
                     engine: name.to_string(),
+                    retry_after_ms: Some(
+                        remaining
+                            .as_millis()
+                            .saturating_add(1)
+                            .min(u64::MAX as u128) as u64,
+                    ),
                     status: EngineStatus::CoolingDown(format!("retry in {}s", remaining.as_secs())),
                 }
             } else {
@@ -1039,6 +1130,7 @@ fn build_reports<E: Copy + PartialEq>(
                 EngineReport {
                     engine: name.to_string(),
                     status,
+                    retry_after_ms: retry_after_ms(name),
                 }
             }
         })
@@ -1057,6 +1149,12 @@ fn cooling_reports<E: Copy>(
         .iter()
         .map(|(e, remaining)| EngineReport {
             engine: name_of(*e).to_string(),
+            retry_after_ms: Some(
+                remaining
+                    .as_millis()
+                    .saturating_add(1)
+                    .min(u64::MAX as u128) as u64,
+            ),
             status: EngineStatus::CoolingDown(format!("retry in {}s", remaining.as_secs())),
         })
         .collect()
@@ -1105,6 +1203,7 @@ where
             engines,
         }),
         CacheEvent::Engine { engine, outcome } => StreamEvent::Engine(EngineReport {
+            retry_after_ms: retry_after_ms(&engine),
             engine,
             status: EngineStatus::from(&outcome),
         }),
@@ -1119,7 +1218,10 @@ where
             next_cursor,
             has_more,
         }),
-        CacheEvent::Error(message) => StreamEvent::Error(StreamErrorPayload { message }),
+        CacheEvent::Error(_) => StreamEvent::Error(StreamErrorPayload {
+            message: "search cache failed".into(),
+            retry_after_ms: None,
+        }),
     }
 }
 
@@ -1135,6 +1237,7 @@ struct StreamAccumulator {
     any_results: bool,
     temporarily_unavailable: bool,
     outcomes: Vec<(String, EngineOutcome)>,
+    cooling_engines: Vec<String>,
 }
 
 impl StreamAccumulator {
@@ -1186,7 +1289,16 @@ where
     let is_terminal = is_done || matches!(event, CacheEvent::Error(_));
     let mut mapped = if is_done {
         match acc.terminal_error_message(usable_is_empty) {
-            Some(message) => StreamEvent::Error(StreamErrorPayload { message }),
+            Some(message) => StreamEvent::Error(StreamErrorPayload {
+                message,
+                retry_after_ms: acc
+                    .cooling_engines
+                    .iter()
+                    .map(String::as_str)
+                    .chain(acc.outcomes.iter().map(|(name, _)| name.as_str()))
+                    .filter_map(retry_after_ms)
+                    .min(),
+            }),
             None => map_cache_event(query, event, convert),
         }
     } else {
@@ -1204,10 +1316,11 @@ where
 /// prepends id-less cooling-down `engine` reports, substitutes an `error`
 /// frame for an empty-window `Done`, and — only for the build's owner (see
 /// [`CacheSubscription::is_owner`]) — calls `record` exactly once with the
-/// final accumulated outcomes when a terminal event is reached. The
-/// forwarding task keeps draining `live` (ignoring send errors) even if the
-/// outbound receiver is dropped, so the owner's outcomes are still recorded
-/// even if the HTTP-side subscriber disconnects first.
+/// final accumulated outcomes when a terminal event is reached. Engine
+/// health is recorded as each source settles (see
+/// [`EngineSource::record_outcome`]); when the outbound receiver is dropped
+/// the forwarder drops its subscription instead of draining it, so an
+/// abandoned build can be cancelled.
 fn build_stream<R, T, F, C>(
     query: String,
     subscription: CacheSubscription<R>,
@@ -1229,6 +1342,10 @@ where
     } = subscription;
 
     let temporarily_unavailable = !cooling_reports.is_empty();
+    let cooling_engines = cooling_reports
+        .iter()
+        .map(|report| report.engine.clone())
+        .collect();
     let mut out_snapshot: Vec<SequencedStreamEvent<T>> = cooling_reports
         .into_iter()
         .map(|report| SequencedStreamEvent {
@@ -1239,6 +1356,7 @@ where
 
     let mut acc = StreamAccumulator {
         temporarily_unavailable,
+        cooling_engines,
         ..StreamAccumulator::default()
     };
     let mut terminal = false;
@@ -1276,17 +1394,27 @@ where
     tokio::spawn(async move {
         let mut live = live;
         let mut acc = acc;
-        while let Some(seq_event) = live.recv().await {
+        loop {
+            let seq_event = tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                event = live.recv() => match event {
+                    Some(event) => event,
+                    None => return,
+                },
+            };
             let SequencedCacheEvent { sequence, event } = seq_event;
             let (mapped, is_terminal) =
                 map_and_observe(&mut acc, usable_is_empty, &query, event, convert);
-            // Ignore send errors: keep draining so the owner's outcomes are
-            // still recorded exactly once even if the downstream (HTTP)
-            // receiver disconnected mid-stream.
-            let _ = tx.send(SequencedStreamEvent {
-                sequence: Some(sequence),
-                event: mapped,
-            });
+            if tx
+                .send(SequencedStreamEvent {
+                    sequence: Some(sequence),
+                    event: mapped,
+                })
+                .is_err()
+            {
+                return;
+            }
             if is_terminal {
                 if is_owner {
                     record(&acc.outcomes);
@@ -1414,15 +1542,6 @@ impl SearchBuilder {
             .get_or_extend(&self.query, &sources, self.start, self.count, self.timeout)
             .await?;
 
-        // Guards against double-recording cooldown outcomes when a
-        // concurrent identical call joined this same underlying cache
-        // build: only the call that actually spawned/owns the build records
-        // — a join sees the exact same `Engine` events its owner already
-        // will.
-        if extend.is_owner {
-            record_outcomes(&usable, SearchEngines::name, &extend.engine_outcomes);
-        }
-
         if extend.rows.is_empty() {
             if usable.is_empty() {
                 return Err(FetchError::AllEnginesCoolingDown);
@@ -1484,11 +1603,7 @@ impl SearchBuilder {
             .await?;
 
         let usable_is_empty = usable.is_empty();
-        let record_usable = usable.clone();
         let profile = self.profile;
-        let record = move |outcomes: &[(String, EngineOutcome)]| {
-            record_outcomes(&record_usable, SearchEngines::name, outcomes);
-        };
 
         Ok(build_stream(
             self.query,
@@ -1496,7 +1611,7 @@ impl SearchBuilder {
             cooling_reports,
             usable_is_empty,
             move |query: &str, row| to_search_result(profile, query, row),
-            record,
+            |_| {},
         ))
     }
 }
@@ -1626,11 +1741,6 @@ impl ImageSearchBuilder {
             .get_or_extend(&self.query, &sources, self.start, self.count, self.timeout)
             .await?;
 
-        // See the matching comment in `SearchBuilder::search`.
-        if extend.is_owner {
-            record_outcomes(&usable, ImageEngines::name, &extend.engine_outcomes);
-        }
-
         if extend.rows.is_empty() {
             if usable.is_empty() {
                 return Err(FetchError::AllEnginesCoolingDown);
@@ -1693,10 +1803,6 @@ impl ImageSearchBuilder {
             .await?;
 
         let usable_is_empty = usable.is_empty();
-        let record_usable = usable.clone();
-        let record = move |outcomes: &[(String, EngineOutcome)]| {
-            record_outcomes(&record_usable, ImageEngines::name, outcomes);
-        };
 
         Ok(build_stream(
             self.query,
@@ -1704,7 +1810,7 @@ impl ImageSearchBuilder {
             cooling_reports,
             usable_is_empty,
             to_image_result,
-            record,
+            |_| {},
         ))
     }
 }
@@ -1720,12 +1826,15 @@ mod test {
         let gate = tokio::sync::Mutex::new(tokio::time::Instant::now());
         let interval = Duration::from_millis(20);
         let request = || async {
-            reserve_engine_slot(&gate, name, interval).await.unwrap();
-            tokio::time::Instant::now()
+            reserve_engine_slot(&gate, name, interval)
+                .await
+                .map(|_| tokio::time::Instant::now())
         };
-        let (first, second, third) = tokio::join!(request(), request(), request());
-        assert!(second.duration_since(first) >= interval - Duration::from_millis(1));
-        assert!(third.duration_since(second) >= interval - Duration::from_millis(1));
+        let first = request().await.unwrap();
+        let (second, third) = tokio::join!(request(), request());
+        let admitted: Vec<_> = [second, third].into_iter().filter_map(Result::ok).collect();
+        assert_eq!(admitted.len(), 1, "only one pacing waiter may queue");
+        assert!(admitted[0].duration_since(first) >= interval - Duration::from_millis(1));
         record_failure(name);
         assert!(reserve_engine_slot(&gate, name, interval).await.is_err());
         record_success(name);
@@ -1779,7 +1888,7 @@ mod test {
     #[test]
     fn all_text_engines_have_unique_names() {
         let engines = SearchEngines::all();
-        assert_eq!(engines.len(), 22);
+        assert_eq!(engines.len(), 23);
 
         let mut names: Vec<_> = engines.iter().map(|engine| engine.name()).collect();
         names.sort_unstable();
@@ -1794,6 +1903,7 @@ mod test {
             vec![
                 SearchEngines::Brave,
                 SearchEngines::DuckDuckGo,
+                SearchEngines::Wiby,
                 SearchEngines::Wikipedia,
             ]
         );
@@ -1882,6 +1992,43 @@ mod test {
         assert!(
             second > first,
             "second consecutive failure's window ({second:?}) should exceed the first's ({first:?})"
+        );
+    }
+
+    /// An upstream `Retry-After` longer than the generic escalating window
+    /// must win: contacting the engine sooner is exactly what got us blocked.
+    #[test]
+    fn a_typed_retry_after_sets_the_cooldown_even_past_the_generic_window() {
+        let outcome = EngineOutcome::Blocked {
+            message: "blocked".into(),
+            retry_after: cooldown_cap() + Duration::from_secs(60),
+        };
+        record_source_outcome("test-engine-6", Instant::now(), &outcome);
+
+        let remaining = cooldown_remaining("test-engine-6").unwrap();
+        assert!(
+            remaining > cooldown_cap(),
+            "an explicit retry-after ({remaining:?}) must outrank the generic cap"
+        );
+        assert!(retry_after_ms("test-engine-6").is_some());
+    }
+
+    /// A request that started before the failure can land afterwards; its
+    /// success describes a stale moment and must not clear a newer cooldown.
+    #[test]
+    fn a_stale_success_cannot_clear_a_newer_failure() {
+        let started = Instant::now();
+        record_failure("test-engine-7");
+        record_source_outcome("test-engine-7", started, &EngineOutcome::Ok);
+        assert!(
+            cooldown_remaining("test-engine-7").is_some(),
+            "a success from before the failure must not reopen the engine"
+        );
+
+        record_source_outcome("test-engine-7", Instant::now(), &EngineOutcome::Ok);
+        assert!(
+            cooldown_remaining("test-engine-7").is_none(),
+            "a success after the failure must clear the cooldown"
         );
     }
 
@@ -2316,7 +2463,7 @@ mod test {
     fn map_cache_event_maps_error() {
         let event: CacheEvent<CachedResult> = CacheEvent::Error("db exploded".into());
         match map_cache_event("test", event, convert_for_test) {
-            StreamEvent::Error(e) => assert_eq!(e.message, "db exploded"),
+            StreamEvent::Error(e) => assert_eq!(e.message, "search cache failed"),
             other => panic!("expected Error, got {other:?}"),
         }
     }
@@ -2376,7 +2523,7 @@ mod test {
             map_and_observe(&mut acc, false, "test", event, convert_for_test);
         assert!(is_terminal);
         match mapped {
-            StreamEvent::Error(e) => assert_eq!(e.message, "db exploded"),
+            StreamEvent::Error(e) => assert_eq!(e.message, "search cache failed"),
             other => panic!("expected Error, got {other:?}"),
         }
     }
@@ -2391,6 +2538,7 @@ mod test {
         let cooling = vec![EngineReport {
             engine: "DuckDuckGo".into(),
             status: EngineStatus::CoolingDown("retry in 30s".into()),
+            retry_after_ms: Some(30000),
         }];
         let mut stream = build_stream(
             "test".into(),
@@ -2559,8 +2707,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn build_stream_keeps_draining_and_still_records_after_the_downstream_receiver_is_dropped()
-     {
+    async fn build_stream_drops_upstream_after_the_downstream_receiver_is_dropped() {
         let (tx, rx) = mpsc::unbounded_channel();
         let subscription = CacheSubscription {
             snapshot: vec![],
@@ -2583,25 +2730,10 @@ mod test {
             },
         );
 
-        // Simulate an HTTP subscriber disconnecting mid-stream: the owner
-        // task must keep draining `live` and still record outcomes exactly
-        // once, even though nothing downstream is listening anymore.
         drop(stream.live);
-
-        tx.send(SequencedCacheEvent {
-            sequence: 1,
-            event: CacheEvent::Results(vec![positioned(0, "https://a.example")]),
-        })
-        .unwrap();
-        tx.send(SequencedCacheEvent {
-            sequence: 2,
-            event: done_event(1),
-        })
-        .unwrap();
-
-        tokio::time::timeout(Duration::from_secs(1), done_rx)
+        tokio::time::timeout(Duration::from_secs(1), tx.closed())
             .await
-            .expect("record should still run even though the downstream receiver was dropped")
-            .unwrap();
+            .expect("forwarder must release its upstream subscription");
+        assert!(done_rx.await.is_err());
     }
 }

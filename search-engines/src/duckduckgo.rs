@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use percent_encoding::percent_decode;
 use reqwest::Url;
 use scraper::{Html, Selector};
 use std::{
@@ -117,8 +116,16 @@ fn looks_like_search_results(html: &str) -> bool {
     html.contains("serp__results")
 }
 
+// Matched against the challenge page's own markup, never a bare word: DDG's
+// bot wall renders `anomaly-modal__*` containers and a `challenge-form`, while
+// the word "anomaly" on its own appears in perfectly ordinary result titles
+// and snippets ("anomaly detection"), which used to burn the engine for the
+// whole cooldown window.
 fn looks_like_captcha(html: &str) -> bool {
-    html.contains(r#"id="challenge-form""#) || html.contains("anomaly")
+    let document = Html::parse_document(html);
+    let selector = Selector::parse("form#challenge-form, .anomaly-modal, .anomaly-modal__modal")
+        .expect("static challenge selector");
+    document.select(&selector).next().is_some()
 }
 
 #[async_trait]
@@ -232,9 +239,11 @@ pub fn parse_response(html: &str) -> Result<Vec<RawResult>, EngineError> {
         ".result__snippet",
     )
     .into_iter()
-    .map(|mut r| {
-        r.url = extract_ddg_url(&r.url).unwrap();
-        r
+    .filter_map(|mut r| {
+        // A result whose redirect target can't be recovered is dropped, not
+        // fatal: one malformed href used to panic the whole engine task.
+        r.url = extract_ddg_url(&r.url)?;
+        Some(r)
     })
     .collect();
 
@@ -242,22 +251,48 @@ pub fn parse_response(html: &str) -> Result<Vec<RawResult>, EngineError> {
 }
 
 fn extract_ddg_url(ddg_href: &str) -> Option<String> {
-    // Decode the DDG redirect link
+    // Decode the DDG redirect link. `query_pairs` already percent-decodes the
+    // value, so decoding it a second time would corrupt destinations that
+    // legitimately contain encoded characters (`%252F` -> `/`, `%2526` -> `&`).
     let url = Url::parse("https://duckduckgo.com")
         .ok()?
         .join(ddg_href)
         .ok()?;
-    for (k, v) in url.query_pairs() {
-        if k == "uddg" {
-            return Some(percent_decode(v.as_bytes()).decode_utf8().ok()?.to_string());
-        }
-    }
-    Some(ddg_href.to_string()) // fallback to raw href
+    let target = url
+        .query_pairs()
+        .find(|(k, _)| k == "uddg")
+        .map(|(_, v)| v.to_string());
+    let candidate = match target {
+        Some(target) => target,
+        // Not a redirect wrapper: keep the href as-is.
+        None => url.to_string(),
+    };
+    // Scraped markup is untrusted; only ever emit http(s) destinations.
+    let parsed = Url::parse(&candidate).ok()?;
+    matches!(parsed.scheme(), "http" | "https").then_some(candidate)
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn ordinary_search_text_cannot_trigger_a_challenge() {
+        assert!(!looks_like_captcha(
+            r#"<div class="serp__results"><a>anomaly detection</a><p>anomaly-modal docs</p></div>"#
+        ));
+        assert!(looks_like_captcha("<form id='challenge-form'></form>"));
+    }
+
+    #[test]
+    fn redirect_decoding_preserves_destination_escapes_and_rejects_scripts() {
+        assert_eq!(
+            extract_ddg_url("/l/?uddg=https%3A%2F%2Fexample.com%2Fa%252Fb%3Fx%3D%2526"),
+            Some("https://example.com/a%2Fb?x=%26".into())
+        );
+        assert!(extract_ddg_url("/l/?uddg=javascript%3Aalert(1)").is_none());
+        assert!(extract_ddg_url("http://[").is_none());
+    }
 
     #[test]
     fn continuation_preserves_all_fields_and_skips_previous_page() {

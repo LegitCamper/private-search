@@ -166,6 +166,12 @@ pub fn parse_response(json: &str) -> Result<Vec<RawResult>, EngineError> {
 
 #[async_trait]
 impl SearchEngine for RubyGems {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(PER_PAGE)
+    }
+
     /// `count` is ignored: the API always returns 30 per page and offers no
     /// knob to change it.
     async fn search_results(

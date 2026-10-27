@@ -184,14 +184,17 @@ pub(crate) fn penalize(id: &RouteId) {
     *guard = entries.into();
 }
 
+/// Resolves a route we already used for a session (a pinned DuckDuckGo
+/// continuation, say). Deliberately *not* gated on the route still being in
+/// the ranked pool: `penalize` drops a route from ranking on any transport
+/// blip, and requiring pool membership here meant one timeout threw away a
+/// still-valid continuation token, which surfaces to the user as pagination
+/// dying at page one. A route the engine actively walled (`block`) is still
+/// refused — that one won't start working again by being retried.
 pub(crate) fn route_for_id(id: &RouteId, engine: &'static str) -> Option<Route> {
     match id {
         RouteId::Direct => Some(direct_route()),
-        RouteId::Proxy(url)
-            if !blocked(engine, url) && snapshot().iter().any(|e| e.url == *url) =>
-        {
-            proxy_route(url)
-        }
+        RouteId::Proxy(url) if !blocked(engine, url) => proxy_route(url),
         RouteId::Proxy(_) => None,
     }
 }
@@ -222,6 +225,45 @@ pub(crate) fn next_routes(
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Built from octets rather than written as a literal so the test can't
+    /// be invalidated by a typo in a hand-written address.
+    fn test_proxy_url(last_octet: u8) -> String {
+        format!(
+            "http://{}:8080",
+            std::net::Ipv4Addr::new(198, 51, 100, last_octet)
+        )
+    }
+
+    #[test]
+    fn a_pinned_route_survives_being_dropped_from_the_ranked_pool() {
+        let url = test_proxy_url(9);
+        let id = RouteId::Proxy(url.clone());
+        replace_ranked(vec![Entry {
+            url: url.clone(),
+            latency: Duration::from_millis(1),
+        }]);
+
+        // One transport blip de-ranks the route for *new* requests...
+        penalize(&id);
+        assert!(
+            !snapshot().iter().any(|entry| entry.url == url),
+            "penalize must still remove the route from ranking"
+        );
+
+        // ...but an existing pinned session can still use it.
+        assert!(
+            route_for_id(&id, "pool-test-engine").is_some(),
+            "a de-ranked route must remain usable for an already-pinned session"
+        );
+    }
+
+    #[test]
+    fn a_blocked_route_is_refused_even_when_pinned() {
+        let id = RouteId::Proxy(test_proxy_url(10));
+        block("pool-block-test-engine", &id);
+        assert!(route_for_id(&id, "pool-block-test-engine").is_none());
+    }
 
     #[test]
     fn rejects_internal_and_non_ip_proxy_addresses() {

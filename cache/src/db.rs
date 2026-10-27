@@ -19,7 +19,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// `canonical` orders published atomically once a full ranking pass
 /// completes. v1's `query_rows` (a single mutable merged index) is gone —
 /// there is no compatibility shim for it, since the cache is disposable.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub async fn init() -> Result<SqlitePool, sqlx::Error> {
     let db_path = env::var(SQLITE_DB_ENV).unwrap_or_else(|_| DEFAULT_SQLITE_DB_NAME.to_string());
@@ -127,13 +127,12 @@ pub(crate) async fn create_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> 
             PRIMARY KEY (query_id, engine_id)
         );
 
-        -- One row per unique URL, globally reused across every query that
-        -- surfaces it. `payload` is the caller's row type, serialized —
-        -- this crate has no idea what shape it is.
         CREATE TABLE IF NOT EXISTS rows (
             id INTEGER PRIMARY KEY,
-            url TEXT NOT NULL UNIQUE,
-            payload TEXT NOT NULL
+            query_id INTEGER NOT NULL REFERENCES queries(id) ON DELETE CASCADE,
+            url TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            UNIQUE (query_id, url)
         );
 
         -- Query membership: is `row_id` part of `query_id`'s result set at
@@ -193,36 +192,28 @@ pub(crate) async fn get_or_create_namespace(
     tx: &mut Transaction<'_, Sqlite>,
     name: &str,
 ) -> Result<i64, sqlx::Error> {
-    if let Some((id,)) = sqlx::query_as::<_, (i64,)>("SELECT id FROM namespaces WHERE name = ?")
-        .bind(name)
-        .fetch_optional(&mut **tx)
-        .await?
-    {
-        return Ok(id);
-    }
-    Ok(sqlx::query("INSERT INTO namespaces (name) VALUES (?)")
+    sqlx::query("INSERT OR IGNORE INTO namespaces (name) VALUES (?)")
         .bind(name)
         .execute(&mut **tx)
-        .await?
-        .last_insert_rowid())
+        .await?;
+    sqlx::query_scalar("SELECT id FROM namespaces WHERE name = ?")
+        .bind(name)
+        .fetch_one(&mut **tx)
+        .await
 }
 
 pub(crate) async fn get_or_create_engine(
     tx: &mut Transaction<'_, Sqlite>,
     name: &str,
 ) -> Result<i64, sqlx::Error> {
-    if let Some((id,)) = sqlx::query_as::<_, (i64,)>("SELECT id FROM engines WHERE name = ?")
-        .bind(name)
-        .fetch_optional(&mut **tx)
-        .await?
-    {
-        return Ok(id);
-    }
-    Ok(sqlx::query("INSERT INTO engines (name) VALUES (?)")
+    sqlx::query("INSERT OR IGNORE INTO engines (name) VALUES (?)")
         .bind(name)
         .execute(&mut **tx)
-        .await?
-        .last_insert_rowid())
+        .await?;
+    sqlx::query_scalar("SELECT id FROM engines WHERE name = ?")
+        .bind(name)
+        .fetch_one(&mut **tx)
+        .await
 }
 
 /// `INSERT OR IGNORE` + fallback `SELECT` (rather than `SELECT` then
@@ -320,22 +311,25 @@ pub(crate) async fn set_progress(
     Ok(())
 }
 
-/// Inserts (or reuses) the global `rows` entry for `url`, returning its id.
+/// Inserts (or reuses) the query-local entry for `url`, returning its id.
 pub(crate) async fn get_or_create_row<R: Serialize>(
     tx: &mut Transaction<'_, Sqlite>,
+    query_id: i64,
     url: &str,
     value: &R,
 ) -> Result<i64, sqlx::Error> {
     let payload = serde_json::to_string(value).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
 
-    let res = sqlx::query("INSERT OR IGNORE INTO rows (url, payload) VALUES (?, ?)")
+    let res = sqlx::query("INSERT OR IGNORE INTO rows (query_id, url, payload) VALUES (?, ?, ?)")
+        .bind(query_id)
         .bind(url)
         .bind(&payload)
         .execute(&mut **tx)
         .await?;
 
     if res.rows_affected() == 0 {
-        let (id,): (i64,) = sqlx::query_as("SELECT id FROM rows WHERE url = ?")
+        let (id,): (i64,) = sqlx::query_as("SELECT id FROM rows WHERE query_id = ? AND url = ?")
+            .bind(query_id)
             .bind(url)
             .fetch_one(&mut **tx)
             .await?;
@@ -493,6 +487,30 @@ pub(crate) async fn append_order_entry(
 /// Number of entries in `order_id` — since positions are assigned densely
 /// from 0, this doubles as "one past the highest position", i.e. the next
 /// append position.
+pub(crate) async fn reconcile_order(
+    pool: &SqlitePool,
+    query_id: i64,
+    order_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO order_entries (order_id, row_id, position)
+         SELECT ?, members.row_id,
+                (SELECT COUNT(*) FROM order_entries WHERE order_id = ?)
+                + ROW_NUMBER() OVER (ORDER BY members.row_id) - 1
+         FROM query_row_members members
+         WHERE members.query_id = ?
+           AND NOT EXISTS (SELECT 1 FROM order_entries
+                           WHERE order_id = ? AND row_id = members.row_id)",
+    )
+    .bind(order_id)
+    .bind(order_id)
+    .bind(query_id)
+    .bind(order_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn order_len(pool: &SqlitePool, order_id: i64) -> Result<i64, sqlx::Error> {
     let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM order_entries WHERE order_id = ?")
         .bind(order_id)
@@ -736,7 +754,7 @@ pub(crate) async fn commit_engine_round<R: Serialize>(
     let mut committed = Vec::with_capacity(fresh.len());
     for (offset, item) in fresh.into_iter().enumerate() {
         let position = start_position + offset as i64;
-        let row_id = get_or_create_row(&mut tx, &item.url, &item.value).await?;
+        let row_id = get_or_create_row(&mut tx, query_id, &item.url, &item.value).await?;
         add_member(&mut tx, query_id, row_id).await?;
         append_order_entry(&mut tx, order_id, row_id, position).await?;
         attribute_engine(&mut tx, query_id, row_id, engine_name).await?;
@@ -824,7 +842,7 @@ pub(crate) async fn commit_first_window<R: Serialize>(
     let mut committed = Vec::with_capacity(ranked.len());
     for (offset, item) in ranked.into_iter().enumerate() {
         let position = start_position + offset as i64;
-        let row_id = get_or_create_row(&mut tx, &item.url, &item.value).await?;
+        let row_id = get_or_create_row(&mut tx, query_id, &item.url, &item.value).await?;
         add_member(&mut tx, query_id, row_id).await?;
         append_order_entry(&mut tx, order_id, row_id, position).await?;
         for engine in &item.engines {

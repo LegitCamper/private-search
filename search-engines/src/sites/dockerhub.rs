@@ -174,6 +174,12 @@ pub fn parse_response(json: &str) -> Result<Vec<RawResult>, EngineError> {
 
 #[async_trait]
 impl SearchEngine for DockerHub {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(PER_PAGE)
+    }
+
     /// `count` is ignored: the page size is ours to choose and changing it
     /// per call would misalign `start` with the pages already fetched.
     async fn search_results(

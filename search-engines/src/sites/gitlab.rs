@@ -180,6 +180,12 @@ fn parse_response(json: &str) -> Result<Vec<RawResult>, EngineError> {
 
 #[async_trait]
 impl SearchEngine for GitLab {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(PER_PAGE)
+    }
+
     /// `count` is ignored: the page size is pinned by [`PER_PAGE`] (see there).
     async fn search_results(
         &self,

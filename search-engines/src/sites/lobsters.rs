@@ -164,6 +164,12 @@ pub fn parse_response(body: &str) -> Result<Vec<RawResult>, EngineError> {
 
 #[async_trait]
 impl SearchEngine for Lobsters {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(PER_PAGE)
+    }
+
     /// `count` is ignored: the search page's size is fixed server-side.
     async fn search_results(
         &self,

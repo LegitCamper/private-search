@@ -4,7 +4,7 @@
   <div class="search-bar-container" onsubmit="return onSearchSubmit()">
     <form action="/search" method="get">
       <input id="search-type" type="hidden" name="t" value="general">
-      <input type="text" class="search-input" placeholder="Search for..." name="q" autocomplete="off">
+      <input type="text" class="search-input" placeholder="Search for..." name="q" autocomplete="off" aria-label="Search query">
     </form>
   </div>
 
@@ -41,9 +41,18 @@
 
 <!-- END-OF-RESULTS MARKER: watched by search.js to load the next page -->
 <div id="load-more-sentinel" aria-hidden="true"></div>
+<div class="search-controls">
+  <p id="search-progress" role="status"></p>
+  <button id="load-more" type="button" hidden>More results</button>
+  <button id="retry-search" type="button" hidden>Retry search</button>
+  <button id="restart-search" type="button">Restart search</button>
+</div>
 
 <!-- ENGINE STATUS SIDEBAR -->
-<aside class="engine-status" id="engine-status" aria-live="polite"></aside>
+<details class="engine-panel">
+  <summary>Search engines</summary>
+  <aside class="engine-status" id="engine-status" aria-live="polite"></aside>
+</details>
 
 <!-- A relative `import` drops the query string, so search.js's own
      `?v=` cache-buster does not reach the module it imports. Mapping the

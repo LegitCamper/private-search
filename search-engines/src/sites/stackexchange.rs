@@ -29,7 +29,10 @@
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::time::Duration;
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use super::{encode, page_number, tidy, truncate};
 use crate::{
@@ -184,7 +187,19 @@ fn describe(item: &Item) -> String {
     description
 }
 
+/// One parsed page: the hits, plus any `backoff` the API attached to an
+/// otherwise-successful response.
+pub struct Page {
+    pub results: Vec<RawResult>,
+    pub backoff: Option<Duration>,
+}
+
+/// Convenience wrapper for callers (and tests) that only want the hits.
 pub fn parse_response(json: &str) -> Result<Vec<RawResult>, EngineError> {
+    parse_page(json).map(|page| page.results)
+}
+
+pub fn parse_page(json: &str) -> Result<Page, EngineError> {
     let response: Response = serde_json::from_str(json).map_err(|e| {
         EngineError::ParseError(format!(
             "{ENGINE} returned a body that isn't the JSON we expect ({e}); \
@@ -192,15 +207,12 @@ pub fn parse_response(json: &str) -> Result<Vec<RawResult>, EngineError> {
         ))
     })?;
 
-    // A `backoff` is the API telling us to stop, even on an HTTP 200. Honor
-    // it before returning results so the cooldown registry sees it.
-    if let Some(seconds) = response.backoff {
-        return Err(EngineError::Blocked {
-            kind: BlockKind::RateLimited,
-            retry_after: Some(Duration::from_secs(seconds)),
-            detail: format!("{ENGINE} asked for a {seconds}s backoff"),
-        });
-    }
+    // A `backoff` means "make no *further* requests to this method for N
+    // seconds" — it does not invalidate the hits in this very response. It is
+    // returned alongside them so the caller can gate the *next* request;
+    // discarding a perfectly good page here used to throw away results the
+    // user had already waited for.
+    let backoff = response.backoff.map(Duration::from_secs);
 
     // Quota exhaustion and throttling come back as a JSON error object, on
     // an HTTP 400 that `body_or_block` doesn't classify on its own.
@@ -215,12 +227,14 @@ pub fn parse_response(json: &str) -> Result<Vec<RawResult>, EngineError> {
         };
         return Err(EngineError::Blocked {
             kind,
-            retry_after: None,
+            // A throttle error usually arrives with the backoff that says
+            // how long to stay away; honour it instead of guessing.
+            retry_after: backoff,
             detail: format!("{ENGINE} API error: {detail}"),
         });
     }
 
-    Ok(response
+    let results = response
         .items
         .iter()
         .filter(|item| item.link.starts_with("https://") && !item.title.is_empty())
@@ -232,11 +246,49 @@ pub fn parse_response(json: &str) -> Result<Vec<RawResult>, EngineError> {
                 description: truncate(&tidy(&description), 300),
             }
         })
-        .collect())
+        .collect();
+
+    Ok(Page { results, backoff })
+}
+
+/// When the API's last `backoff` expires. A backoff applies to the *next*
+/// request, so it is remembered here rather than turned into an error that
+/// throws away the page it arrived with.
+static BACKOFF_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn backoff_remaining() -> Option<Duration> {
+    let mut guard = BACKOFF_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+    let until = (*guard)?;
+    match until.checked_duration_since(Instant::now()) {
+        Some(remaining) if !remaining.is_zero() => Some(remaining),
+        _ => {
+            *guard = None;
+            None
+        }
+    }
+}
+
+fn remember_backoff(backoff: Option<Duration>) {
+    let Some(backoff) = backoff else { return };
+    let mut guard = BACKOFF_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+    // Keep the longest pause: a concurrent response carrying a shorter
+    // backoff must not shorten one the API already asked for.
+    *guard = (*guard).max(Instant::now().checked_add(backoff));
+}
+
+#[cfg(test)]
+fn forget_backoff() {
+    *BACKOFF_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 #[async_trait]
 impl SearchEngine for StackExchange {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(PER_PAGE)
+    }
+
     async fn search_results(
         &self,
         query: &str,
@@ -245,6 +297,17 @@ impl SearchEngine for StackExchange {
     ) -> Result<Vec<RawResult>, EngineError> {
         if page_number(start, PER_PAGE) > MAX_PAGE {
             return Ok(Vec::new());
+        }
+
+        // The API asked us to stay off this method for a while. Spending a
+        // quota unit to be told that again is exactly the futile traffic the
+        // cooldown layer exists to avoid.
+        if let Some(remaining) = backoff_remaining() {
+            return Err(EngineError::Blocked {
+                kind: BlockKind::RateLimited,
+                retry_after: Some(remaining),
+                detail: format!("{ENGINE} asked for a {}s backoff", remaining.as_secs()),
+            });
         }
 
         // Not `get_json`: a `backoff` field has to be read off the parsed
@@ -257,7 +320,9 @@ impl SearchEngine for StackExchange {
             .map_err(EngineError::ReqwestError)?;
 
         let body = body_or_block(resp, ENGINE).await?;
-        parse_response(&body)
+        let page = parse_page(&body)?;
+        remember_backoff(page.backoff);
+        Ok(page.results)
     }
 }
 
@@ -398,14 +463,45 @@ mod test {
     }
 
     #[test]
-    fn parse_response_surfaces_a_backoff_as_a_rate_limit_block() {
-        let json = r#"{"items":[],"has_more":false,"backoff":10,"quota_remaining":295}"#;
+    fn parse_page_reports_a_backoff_without_discarding_the_page() {
+        let json = fixture("stackexchange.json")
+            .replace(r#""has_more":true"#, r#""has_more":true,"backoff":10"#);
+        let page = parse_page(&json).expect("a backoff must not fail the page");
+        assert_eq!(page.backoff, Some(Duration::from_secs(10)));
+        assert!(
+            !page.results.is_empty(),
+            "the hits that arrived with the backoff must still be served"
+        );
+    }
+
+    #[test]
+    fn a_remembered_backoff_blocks_the_next_request_then_expires() {
+        forget_backoff();
+        remember_backoff(Some(Duration::from_secs(30)));
+        let long = backoff_remaining().expect("a fresh backoff must block");
+
+        // A shorter concurrent backoff must not cut the longer pause short.
+        remember_backoff(Some(Duration::from_secs(1)));
+        assert!(backoff_remaining().unwrap() > Duration::from_secs(1));
+        assert!(backoff_remaining().unwrap() <= long);
+
+        forget_backoff();
+        assert!(
+            backoff_remaining().is_none(),
+            "an elapsed backoff must not keep the engine blocked"
+        );
+    }
+
+    #[test]
+    fn a_throttle_error_carries_the_api_backoff_as_its_retry_after() {
+        let json = r#"{"error_id":502,"error_message":"too many requests",
+            "error_name":"throttle_violation","backoff":22}"#;
         match parse_response(json) {
             Err(EngineError::Blocked {
                 kind, retry_after, ..
             }) => {
                 assert_eq!(kind, BlockKind::RateLimited);
-                assert_eq!(retry_after, Some(Duration::from_secs(10)));
+                assert_eq!(retry_after, Some(Duration::from_secs(22)));
             }
             other => panic!("expected a rate-limit block, got {other:?}"),
         }

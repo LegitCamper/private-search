@@ -198,6 +198,12 @@ fn parse_response(json: &str) -> Result<Vec<RawResult>, EngineError> {
 
 #[async_trait]
 impl SearchEngine for Codeberg {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(PER_PAGE)
+    }
+
     /// `count` is ignored: the page size is fixed at [`PER_PAGE`] so that a
     /// given `start` always lands on the same page boundary, which is what
     /// makes the cache layer's dedupe across pages work.

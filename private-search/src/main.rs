@@ -194,11 +194,13 @@ impl Fairing for CacheFairing {
         let path = req.uri().path();
 
         if path.starts_with("/static/") {
-            // Safe to cache hard: templates request these with `?v={version}`,
-            // so a deploy that changes an asset changes its URL.
             res.set_header(rocket::http::Header::new(
                 "Cache-Control",
-                "public, max-age=86400",
+                if path.ends_with(".js") || path.ends_with(".css") {
+                    "no-cache"
+                } else {
+                    "public, max-age=86400"
+                },
             ));
         } else if path.starts_with("/query/stream") {
             // Every frame is either freshly-fetched or a live cache replay
@@ -286,7 +288,7 @@ fn api_error(status: Status, message: impl Into<String>) -> (Status, Json<ApiErr
 /// `/query/stream` has actually started emitting frames, a `FetchError` can
 /// no longer reach this helper — see `event_for`/`is_terminal` instead, which
 /// surface an `error` SSE event.
-fn map_fetch_error(e: FetchError, tab: &str, query: &str) -> (Status, Json<ApiErrorBody>) {
+fn map_fetch_error(e: FetchError, tab: &str, _query: &str) -> (Status, Json<ApiErrorBody>) {
     let status = if e.is_unknown_order() {
         Status::BadRequest
     } else {
@@ -298,17 +300,17 @@ fn map_fetch_error(e: FetchError, tab: &str, query: &str) -> (Status, Json<ApiEr
     };
     match &e {
         FetchError::Cache(cache_err) if e.is_unknown_order() => {
-            log::warn!("unknown or expired order token: tab={tab} query={query:?}: {cache_err}")
+            log::warn!("unknown or expired order token: tab={tab}: {cache_err}")
         }
         FetchError::Cache(cache_err) => log::error!("cache db error: {cache_err}"),
         FetchError::AllEnginesFailed => {
-            log::error!("all engines failed: tab={tab} query={query:?}")
+            log::error!("all engines failed: tab={tab}")
         }
         // Not an error worth alarming on: the cooldown is working as
         // intended, deliberately skipping engines that recently failed
         // instead of hammering them again.
         FetchError::AllEnginesCoolingDown => {
-            log::warn!("all engines cooling down: tab={tab} query={query:?}")
+            log::warn!("all engines cooling down: tab={tab}")
         }
     }
     let message = match &e {
@@ -376,10 +378,7 @@ async fn query(
     }
     .map_err(|e| map_fetch_error(e, tab, query))?;
 
-    log::debug!(
-        "query ok: tab={tab} query={query:?} results={}",
-        results_len(&results)
-    );
+    log::debug!("query ok: tab={tab} results={}", results_len(&results));
 
     Ok(Json(results))
 }
@@ -472,6 +471,9 @@ async fn query_stream(
     order: Option<i64>,
     after: Option<u64>,
 ) -> Result<EventStream<Pin<Box<dyn Stream<Item = Event> + Send>>>, (Status, Json<ApiErrorBody>)> {
+    if after.is_some_and(|sequence| sequence > 9_007_199_253_000_000) {
+        return Err(api_error(Status::BadRequest, "invalid resume sequence"));
+    }
     if count == 0 || count > MAX_COUNT {
         return Err(api_error(
             Status::BadRequest,
@@ -597,7 +599,7 @@ mod test {
     }
 
     #[rocket::async_test]
-    async fn search_pages_are_revalidated_but_static_assets_are_cached() {
+    async fn pages_and_scripts_revalidate_without_a_version_bump() {
         let client = client().await;
 
         let page = client.get("/search?q=rust&t=general").dispatch().await;
@@ -608,8 +610,10 @@ mod test {
         );
 
         let asset = client.get("/static/search-core.js").dispatch().await;
+        assert_eq!(asset.headers().get_one("Cache-Control"), Some("no-cache"));
+        let image = client.get("/static/300.ico").dispatch().await;
         assert_eq!(
-            asset.headers().get_one("Cache-Control"),
+            image.headers().get_one("Cache-Control"),
             Some("public, max-age=86400")
         );
     }
@@ -892,6 +896,7 @@ mod test {
         SequencedStreamEvent {
             sequence: None,
             event: StreamEvent::Engine(private_search_engines::EngineReport {
+                retry_after_ms: None,
                 engine: "duckduckgo".to_string(),
                 status: private_search_engines::EngineStatus::Ok,
             }),

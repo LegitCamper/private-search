@@ -123,9 +123,8 @@ where
         };
     }
 
-    let default_racers = if plan.engine == "DuckDuckGo" { 2 } else { 3 };
-    let racers = env_usize("ENGINE_PROXY_RACERS", default_racers).clamp(1, 3);
-    let waves = env_usize("ENGINE_PROXY_WAVES", 2).clamp(1, 2);
+    let racers = env_usize("ENGINE_PROXY_RACERS", 1).clamp(1, 3);
+    let waves = env_usize("ENGINE_PROXY_WAVES", 1).clamp(1, 2);
     let mut tried = HashSet::new();
     let mut proxy_parse_error = None;
     let mut proxies_all_parse = true;

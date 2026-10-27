@@ -49,8 +49,8 @@ fn looks_like_image_results(html: &str) -> bool {
 
 #[async_trait]
 impl SearchEngine for Brave {
-    fn next_start(&self, start: usize, _result_count: usize) -> usize {
-        (start / BRAVE_RESULTS_PER_PAGE + 1).saturating_mul(BRAVE_RESULTS_PER_PAGE)
+    fn page_size(&self) -> Option<usize> {
+        Some(BRAVE_RESULTS_PER_PAGE)
     }
 
     async fn search_results(

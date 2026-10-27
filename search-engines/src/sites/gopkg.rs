@@ -100,6 +100,12 @@ fn parse_response(json: &str, start: usize) -> Result<Vec<RawResult>, EngineErro
 
 #[async_trait]
 impl SearchEngine for GoPkg {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(PER_PAGE)
+    }
+
     async fn search_results(
         &self,
         query: &str,

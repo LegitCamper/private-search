@@ -76,6 +76,12 @@ struct Package {
 
 #[async_trait]
 impl SearchEngine for Packagist {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(PER_PAGE)
+    }
+
     /// `count` is ignored: the page size is fixed so that `start` maps onto a
     /// page boundary.
     async fn search_results(

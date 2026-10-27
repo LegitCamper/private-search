@@ -7,6 +7,8 @@ import {
   isWithinPreloadRange,
   shouldAutoContinue,
   retryDelayMs,
+  isRetryableStatus,
+  retryAfterMs,
   SkeletonQueue,
   SSEParser,
   StreamStateReducer,
@@ -33,6 +35,9 @@ let consecutiveFailures = 0;
 let hasMoreResults = true; // server said there could be another page; only fetch it once the user scrolls for it
 let lastBatchSize = 0; // distinct results rendered by the most recent page
 let retryTimer = null;
+let retryAt = 0;
+let requestController = null;
+const engineRetryAt = new Map();
 
 // Page-wide state persists across pagination and reconnects.
 const seenUrls = new Set();
@@ -86,6 +91,15 @@ addEventListener("DOMContentLoaded", (event) => {
       createSearchSkeletons(pageSize());
   }
   window.scrollTo(0, 0);
+  document.getElementById("load-more").addEventListener("click", loadNextPage);
+  document.getElementById("retry-search").addEventListener("click", () => {
+    if (batchLoading || Date.now() < retryAt) return;
+    clearRetry();
+    polling = true;
+    streamResults(get_query());
+  });
+  document.getElementById("restart-search").addEventListener("click", () => location.reload());
+  setInterval(updateControls, 1000);
 
   let query = get_query();
   document.querySelector(".search-input").value = query;
@@ -104,8 +118,8 @@ async function startPolling(query) {
 function stopPolling() {
   polling = false;
   clearRetry();
-  // Only loadNextPage's finally handler releases batchLoading. Releasing it
-  // here can race the next auto-started page.
+  // streamResults' own finally releases batchLoading; releasing it here can
+  // race the next auto-started page.
 }
 
 function clearRetry() {
@@ -113,17 +127,35 @@ function clearRetry() {
     clearTimeout(retryTimer);
     retryTimer = null;
   }
+  retryAt = 0;
 }
 
-function scheduleRetry(query, status, message) {
+function scheduleRetry(query, status, message, retryAfterMs = 0) {
   if (!polling || retryTimer !== null) return;
 
+  if (!isRetryableStatus(status)) {
+    stopPolling();
+    stopWatchingForEnd();
+    hasMoreResults = false;
+    dropUnfilledSkeletons();
+    setErrorBanner(`${message}. Restart search to begin again.`);
+    updateControls();
+    return;
+  }
   onPollFailure(message);
-  const delay = retryDelayMs(status, consecutiveFailures);
-  retryTimer = setTimeout(() => {
+  const delay = Math.max(retryDelayMs(status, consecutiveFailures), retryAfterMs);
+  retryAt = Date.now() + delay;
+  const retry = () => {
+    if (Date.now() < retryAt) {
+      retryTimer = setTimeout(retry, Math.min(retryAt - Date.now(), 2147483647));
+      return;
+    }
     retryTimer = null;
+    retryAt = 0;
     if (polling) streamResults(query);
-  }, delay);
+  };
+  retryTimer = setTimeout(retry, Math.min(delay, 2147483647));
+  updateControls();
 }
 
 // Extracts `{error: "..."}` from a non-OK JSON response, falling back to
@@ -164,7 +196,10 @@ function onPollSuccess() {
 }
 
 async function streamResults(query) {
-  if (!polling || query === undefined || query === null) return;
+  if (!polling || batchLoading || query === undefined || query === null) return;
+  batchLoading = true;
+  requestController = new AbortController();
+  updateControls();
 
   const params = new URLSearchParams({
     tab: currentTab,
@@ -180,11 +215,12 @@ async function streamResults(query) {
   }
 
   let receivedTerminal = false;
+  let reader;
 
   try {
-    const res = await fetch(`/query/stream?${params}`);
+    const res = await fetch(`/query/stream?${params}`, { signal: requestController.signal });
     if (!res.ok) {
-      scheduleRetry(query, res.status, await describeError(res));
+      scheduleRetry(query, res.status, await describeError(res), retryAfterMs(res.headers.get("Retry-After")));
       return;
     }
     if (!res.body) {
@@ -194,21 +230,16 @@ async function streamResults(query) {
 
     const parser = new SSEParser();
     const decoder = new TextDecoder();
-    const reader = res.body.getReader();
-    let markedSuccessful = false;
+    reader = res.body.getReader();
 
     parser.on("frame", (frame) => {
+      if (receivedTerminal) return;
       currentPageReducer.processFrame(frame);
 
       // Meta identifies the exact order being read. Keep it immediately so a
       // disconnect before done reconnects to the same generation.
       if (currentPageReducer.activeOrderToken !== null) {
         currentPageOrderToken = currentPageReducer.activeOrderToken;
-      }
-
-      if (!markedSuccessful && frame.event !== "error") {
-        markedSuccessful = true;
-        onPollSuccess();
       }
 
       for (const action of currentPageReducer.actions) {
@@ -224,6 +255,7 @@ async function streamResults(query) {
             break;
           case "done":
             receivedTerminal = true;
+            onPollSuccess();
             hasMoreResults = action.hasMore;
             nextPageStart = action.nextCursor ?? currentPageReducer.serverCursor;
             currentPageOrderToken = action.activeOrderId ?? currentPageOrderToken;
@@ -231,28 +263,29 @@ async function streamResults(query) {
               stopPolling();
               if (lastBatchSize === 0) dropUnfilledSkeletons();
               watchForEnd();
-              scheduleContinue();
             } else {
               finishSearch();
             }
             break;
           case "error":
             receivedTerminal = true;
-            scheduleRetry(query, 0, action.message);
+            scheduleRetry(query, action.retryable === false ? 400 : 503, action.message, action.retryAfterMs);
             break;
         }
       }
     });
 
-    while (true) {
+    while (!receivedTerminal) {
       const { done, value } = await reader.read();
       if (done) break;
       parser.feed(decoder.decode(value, { stream: true }));
     }
 
-    const finalChunk = decoder.decode();
-    if (finalChunk) parser.feed(finalChunk);
-    parser.end();
+    if (!receivedTerminal) {
+      const finalChunk = decoder.decode();
+      if (finalChunk) parser.feed(finalChunk);
+      parser.end();
+    }
 
     if (!receivedTerminal) {
       scheduleRetry(query, 0, "stream disconnected");
@@ -261,6 +294,12 @@ async function streamResults(query) {
     if (!receivedTerminal) {
       scheduleRetry(query, 0, "network error");
     }
+  } finally {
+    if (reader) reader.cancel().catch(() => {});
+    requestController = null;
+    batchLoading = false;
+    updateControls();
+    if (receivedTerminal && !polling) scheduleContinue();
   }
 }
 
@@ -313,9 +352,10 @@ function renderImageResult(skeleton, result, cached) {
   const href = url(result.url);
 
   skeleton.innerHTML = `
-    <a href="${href}" target="_blank" rel="noopener">
-      <img src="${href}" class="image-thumb" alt="" loading="lazy" decoding="async">
+    <a href="${href}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(result.title || "Open image")}">
+      <img data-src="${href}" class="image-thumb" alt="${escapeHtml(result.title || "Search image")}" hidden decoding="async" referrerpolicy="no-referrer">
     </a>
+    <button type="button" class="load-image">Load external image</button>
 
     <figcaption>
       <div class="image-title">${escapeHtml(result.title || "")}</div>
@@ -327,6 +367,12 @@ function renderImageResult(skeleton, result, cached) {
   `;
 
   skeleton.className = "image-result";
+  skeleton.querySelector(".load-image").addEventListener("click", (event) => {
+    const image = skeleton.querySelector("img");
+    image.src = image.dataset.src;
+    image.hidden = false;
+    event.currentTarget.remove();
+  });
 }
 
 function updateResultAttribution(action) {
@@ -368,10 +414,15 @@ function renderEngineStatusIncremental(engineName, report) {
   }
 
   row.title = detail || "";
+  if (Number.isFinite(report.retryAfterMs) && report.retryAfterMs > 0) {
+    engineRetryAt.set(engineName, Date.now() + report.retryAfterMs);
+  } else {
+    engineRetryAt.delete(engineName);
+  }
   row.innerHTML = `
     <span class="engine-status-dot ${escapeHtml(status)}"></span>
     <span class="engine-status-name">${escapeHtml(engineName)}</span>
-    <span class="engine-status-detail">${label}</span>
+    <span class="engine-status-detail">${label}${detail ? `: ${escapeHtml(detail)}` : ""}</span>
   `;
 }
 
@@ -505,7 +556,6 @@ function loadNextPage() {
   // another page of skeletons.
   if (!canLoadNextPage({ batchLoading, polling, hasMoreResults })) return;
 
-  batchLoading = true; // mark that we are loading
   lastBatchSize = 0; // Reset for the new page
 
   if (currentTab === "images") {
@@ -514,10 +564,37 @@ function loadNextPage() {
     createSearchSkeletons(skeletonsNeeded(searchSkeletons.length, pageSize()));
   }
 
-  startPolling(get_query()).finally(() => {
-    batchLoading = false; // ready for the next batch
-  });
+  startPolling(get_query());
 }
+
+function updateControls() {
+  const more = document.getElementById("load-more");
+  const retry = document.getElementById("retry-search");
+  if (!more || !retry) return;
+  more.hidden = !hasMoreResults || polling;
+  more.disabled = batchLoading;
+  retry.hidden = retryAt === 0;
+  retry.disabled = batchLoading || Date.now() < retryAt;
+  retry.textContent = retryAt > Date.now()
+    ? `Retry in ${Math.ceil((retryAt - Date.now()) / 1000)}s`
+    : "Retry search";
+  document.getElementById("search-progress").textContent = batchLoading
+    ? "Loading results..."
+    : !polling && hasMoreResults ? "More sources may have results. Load more when ready." : "";
+  for (const row of document.querySelectorAll(".engine-status-row")) {
+    const deadline = engineRetryAt.get(row.dataset.engine);
+    if (deadline) {
+      row.querySelector(".engine-status-detail").textContent = deadline > Date.now()
+        ? `paused: retry in ${Math.ceil((deadline - Date.now()) / 1000)}s`
+        : "ready to retry";
+    }
+  }
+}
+
+addEventListener("pagehide", () => {
+  stopPolling();
+  requestController?.abort();
+});
 
 // Re-checks, after a batch lands, whether the end of the list is *still* in
 // view — the observer alone won't say so, because a target that was already

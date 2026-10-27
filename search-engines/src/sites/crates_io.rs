@@ -177,6 +177,12 @@ fn to_results(response: &SearchResponse) -> Vec<RawResult> {
 
 #[async_trait]
 impl SearchEngine for CratesIo {
+    /// Fixed upstream page size: the cursor must land on a page
+    /// boundary, never on "however many rows survived filtering".
+    fn page_size(&self) -> Option<usize> {
+        Some(PER_PAGE)
+    }
+
     /// `count` is ignored: the page size is fixed at [`PER_PAGE`] so that
     /// `start` maps cleanly onto crates.io's 1-based `page`.
     async fn search_results(

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::IpAddr,
     sync::Mutex,
     time::{Duration, Instant},
@@ -25,6 +25,7 @@ const MAX_TRACKED_IPS: usize = 100_000;
 /// on the whole deployment, or the instance being used as a free scraping
 /// proxy.
 pub struct RateLimiter {
+    trusted_proxies: HashSet<IpAddr>,
     hits: Mutex<HashMap<IpAddr, (Instant, u32)>>,
     window: Duration,
     max_per_window: u32,
@@ -36,7 +37,19 @@ pub struct RateLimiter {
 
 impl Default for RateLimiter {
     fn default() -> Self {
-        Self::new(WINDOW, MAX_REQUESTS_PER_WINDOW)
+        let mut limiter = Self::new(WINDOW, MAX_REQUESTS_PER_WINDOW);
+        limiter.trusted_proxies = std::env::var("TRUSTED_PROXY_IPS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value
+                    .parse()
+                    .expect("TRUSTED_PROXY_IPS must contain comma-separated IP addresses")
+            })
+            .collect();
+        limiter
     }
 }
 
@@ -46,6 +59,7 @@ impl RateLimiter {
     /// real 60s production one.
     fn new(window: Duration, max_per_window: u32) -> Self {
         Self {
+            trusted_proxies: HashSet::new(),
             hits: Mutex::new(HashMap::new()),
             window,
             max_per_window,
@@ -114,6 +128,15 @@ impl RateLimiter {
     }
 }
 
+fn client_key(req: &Request<'_>, limiter: &RateLimiter) -> Option<IpAddr> {
+    let peer = req.remote()?.ip();
+    if limiter.trusted_proxies.contains(&peer) {
+        Some(req.client_ip().unwrap_or(peer))
+    } else {
+        Some(peer)
+    }
+}
+
 /// Request guard that enforces [`RateLimiter`] on whichever route declares
 /// it as a parameter. Rejects with `429 Too Many Requests` once an IP
 /// exceeds [`MAX_REQUESTS_PER_WINDOW`] in a rolling [`WINDOW`].
@@ -132,9 +155,7 @@ impl<'r> FromRequest<'r> for RateLimited {
         // Falls back to a fixed key if we genuinely can't determine the
         // caller's address, so a misconfigured proxy fails closed (shared
         // rate limit) rather than open (no limit at all).
-        let ip = req
-            .client_ip()
-            .unwrap_or_else(|| IpAddr::from([0, 0, 0, 0]));
+        let ip = client_key(req, limiter).unwrap_or_else(|| IpAddr::from([0, 0, 0, 0]));
 
         if limiter.allow(ip) {
             Outcome::Success(RateLimited)
@@ -147,6 +168,60 @@ impl<'r> FromRequest<'r> for RateLimited {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[rocket::get("/limited")]
+    fn limited(_limit: RateLimited) -> &'static str {
+        "ok"
+    }
+
+    #[rocket::async_test]
+    async fn forged_headers_cannot_create_new_buckets() {
+        let client = rocket::local::asynchronous::Client::tracked(
+            rocket::build()
+                .manage(RateLimiter::new(Duration::from_secs(60), 1))
+                .mount("/", rocket::routes![limited]),
+        )
+        .await
+        .unwrap();
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 40000));
+        for (octet, status) in [(1, Status::Ok), (2, Status::TooManyRequests)] {
+            let response = client
+                .get("/limited")
+                .remote(peer)
+                .header(rocket::http::Header::new(
+                    "X-Real-IP",
+                    IpAddr::from([192, 0, 2, octet]).to_string(),
+                ))
+                .dispatch()
+                .await;
+            assert_eq!(response.status(), status);
+        }
+    }
+
+    #[rocket::async_test]
+    async fn forwarded_addresses_require_an_allowlisted_peer() {
+        let mut limiter = RateLimiter::new(Duration::from_secs(60), 1);
+        limiter.trusted_proxies.insert(IpAddr::from([127, 0, 0, 1]));
+        let client = rocket::local::asynchronous::Client::tracked(
+            rocket::build()
+                .manage(limiter)
+                .mount("/", rocket::routes![limited]),
+        )
+        .await
+        .unwrap();
+        for octet in [1, 2] {
+            let response = client
+                .get("/limited")
+                .remote(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)))
+                .header(rocket::http::Header::new(
+                    "X-Real-IP",
+                    IpAddr::from([192, 0, 2, octet]).to_string(),
+                ))
+                .dispatch()
+                .await;
+            assert_eq!(response.status(), Status::Ok);
+        }
+    }
 
     fn ip(n: u8) -> IpAddr {
         IpAddr::from([127, 0, 0, n])
