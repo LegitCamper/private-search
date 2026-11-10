@@ -246,7 +246,7 @@ fn health() -> Status {
 
 #[allow(unused_variables)]
 #[get("/search?<t>&<q>")]
-fn search(t: Option<String>, q: &str) -> Result<Template, Redirect> {
+fn search(t: Option<String>, q: &str) -> Result<Template, Box<Redirect>> {
     if let Ok(target) = Reference::parse(q.trim())
         && target.scheme().is_some_and(|scheme| {
             scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
@@ -255,7 +255,7 @@ fn search(t: Option<String>, q: &str) -> Result<Template, Redirect> {
             .authority()
             .is_some_and(|authority| !authority.host().is_empty())
     {
-        return Err(Redirect::to(target.into_owned()));
+        return Err(Box::new(Redirect::to(target.into_owned())));
     }
 
     Ok(Template::render(
