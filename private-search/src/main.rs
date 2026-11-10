@@ -6,7 +6,7 @@ use rocket::{
     fairing::{Fairing, Info, Kind},
     fs::FileServer,
     futures::stream::{self, Stream},
-    http::Status,
+    http::{Status, ext::IntoOwned, uri::Reference},
     response::{
         Redirect,
         stream::{Event, EventStream},
@@ -246,14 +246,25 @@ fn health() -> Status {
 
 #[allow(unused_variables)]
 #[get("/search?<t>&<q>")]
-fn search(t: Option<String>, q: &str) -> Template {
-    Template::render(
+fn search(t: Option<String>, q: &str) -> Result<Template, Redirect> {
+    if let Ok(target) = Reference::parse(q.trim())
+        && target.scheme().is_some_and(|scheme| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        })
+        && target
+            .authority()
+            .is_some_and(|authority| !authority.host().is_empty())
+    {
+        return Err(Redirect::to(target.into_owned()));
+    }
+
+    Ok(Template::render(
         "search",
         context! {
             title: "Search",
             version: VERSION,
         },
-    )
+    ))
 }
 
 #[derive(Serialize, Debug)]
@@ -596,6 +607,48 @@ mod test {
         let res = client.get("/search").dispatch().await;
         assert_eq!(res.status(), Status::SeeOther);
         assert_eq!(res.headers().get_one("Location"), Some("/"));
+    }
+
+    #[rocket::async_test]
+    async fn search_redirects_http_urls() {
+        let client = client().await;
+        for query in [
+            "http://example.com",
+            "https://example.com/path?q=rust&lang=en#results",
+            "  HTTPS://example.com/path%20name  ",
+            "http://localhost:8080/path",
+        ] {
+            let res = client
+                .get(uri!(search(t = Some("images"), q = query)))
+                .dispatch()
+                .await;
+            assert_eq!(res.status(), Status::SeeOther, "{query}");
+            assert_eq!(res.headers().get_one("Location"), Some(query.trim()));
+        }
+    }
+
+    #[rocket::async_test]
+    async fn search_keeps_text_and_invalid_urls_as_queries() {
+        let client = client().await;
+        for query in [
+            "rust programming",
+            "example.com",
+            "javascript:alert(1)",
+            "ftp://example.com",
+            "//example.com",
+            "https://",
+            "https:///path",
+            "https:example.com",
+            "https://example.com extra words",
+            "https://example.com/\r\nLocation: https://other.example",
+        ] {
+            let res = client
+                .get(uri!(search(t = None::<&str>, q = query)))
+                .dispatch()
+                .await;
+            assert_eq!(res.status(), Status::Ok, "{query}");
+            assert_eq!(res.headers().get_one("Location"), None, "{query}");
+        }
     }
 
     #[rocket::async_test]
